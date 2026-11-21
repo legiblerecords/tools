@@ -23,13 +23,11 @@ pub fn check(old: &Value, new: &Value) -> Vec<Break> {
         breaks.push(brk("", "both schemas must be objects"));
         return breaks;
     };
-    for key in ["$id"] {
-        if old.get(key) != new.get(key) {
-            breaks.push(brk(
-                &format!("/{key}"),
-                "$id changed: a compatible change keeps the type and major version",
-            ));
-        }
+    if old.get("$id") != new.get("$id") {
+        breaks.push(brk(
+            "/$id",
+            "$id changed: a compatible change keeps the type and major version",
+        ));
     }
     node(old, new, "", &mut breaks);
     breaks
