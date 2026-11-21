@@ -24,4 +24,5 @@ opt-level = "z"
 lto = true
 codegen-units = 1
 panic = "abort"
-strip = true
+# Not strip: wasm-bindgen and wasm-opt need the target_features section to
+# know which WebAssembly features are in use. build.sh strips after wasm-opt.

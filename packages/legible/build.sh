@@ -36,7 +36,7 @@ cp "$work/node/legible_records_wasm.js" "$here/dist/legible_records_wasm.cjs"
 cp "$work/node/legible_records_wasm.d.ts" "$here/dist/legible_records_wasm.d.cts"
 
 if command -v wasm-opt >/dev/null 2>&1; then
-  wasm-opt -Oz --strip-debug --strip-producers \
+  wasm-opt -Oz --strip-debug --strip-producers --strip-target-features \
     "$here/dist/legible_records_wasm_bg.wasm" -o "$here/dist/legible_records_wasm_bg.wasm"
 fi
 cp "$root/LICENSE" "$here/LICENSE"
