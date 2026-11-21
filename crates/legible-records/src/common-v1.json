@@ -1,0 +1,101 @@
+{
+  "$defs": {
+    "attachment": {
+      "description": "A file that travels with records in a bundle.",
+      "properties": {
+        "media_type": {
+          "description": "Such as application/pdf.",
+          "type": "string"
+        },
+        "name": {
+          "description": "The file's name for people, such as access-review-q3.pdf.",
+          "type": "string"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      },
+      "required": [
+        "sha256",
+        "name",
+        "media_type"
+      ],
+      "type": "object"
+    },
+    "date": {
+      "format": "date",
+      "type": "string"
+    },
+    "datetime": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "email": {
+      "format": "email",
+      "type": "string"
+    },
+    "produced_by": {
+      "description": "What wrote the file.",
+      "properties": {
+        "app": {
+          "description": "The app or tool, such as track or tolerance.monorail.tools.",
+          "type": "string"
+        },
+        "build": {
+          "description": "Its version or build.",
+          "type": "string"
+        },
+        "output": {
+          "description": "Which of its outputs, when it has several.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "app"
+      ],
+      "type": "object"
+    },
+    "refString": {
+      "description": "A reference to another record, kind:key, optionally #part.",
+      "pattern": "^[a-z][a-z-]*:[a-z0-9-]+(#[a-z0-9-]+)?$",
+      "type": "string"
+    },
+    "sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "slug": {
+      "description": "A lowercase key made of letters, digits and single hyphens.",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+      "type": "string"
+    },
+    "source": {
+      "description": "What the file was built from.",
+      "properties": {
+        "as_of": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "refs": {
+          "description": "Identifiers in that system, such as commit ids.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "system": {
+          "description": "The system of record, such as track.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "system"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://legiblerecords.org/schemas/org.legiblerecords.common/v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Definitions every Legible Records type can use.",
+  "title": "common"
+}

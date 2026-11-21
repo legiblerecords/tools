@@ -1,0 +1,1351 @@
+{
+ "cases": [
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-string",
+   "schema": "t",
+   "short": "fields:\n  x: string\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "type": "integer"
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-integer",
+   "schema": "t",
+   "short": "fields:\n  x: integer\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "type": "number"
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-number",
+   "schema": "t",
+   "short": "fields:\n  x: number\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-boolean",
+   "schema": "t",
+   "short": "fields:\n  x: boolean\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "type": "object"
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-object",
+   "schema": "t",
+   "short": "fields:\n  x: object\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "type": "null"
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-null",
+   "schema": "t",
+   "short": "fields:\n  x: \"null\"\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "format": "date-time",
+       "type": "string"
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-format",
+   "schema": "t",
+   "short": "fields:\n  x: string(date-time)\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "pattern": "^[a-z]+\\/[0-9]+$",
+       "type": "string"
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-pattern",
+   "schema": "t",
+   "short": "fields:\n  x: /^[a-z]+\\/[0-9]+$/\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "maximum": 5,
+       "minimum": 1,
+       "type": "integer"
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-range-both",
+   "schema": "t",
+   "short": "fields:\n  x: integer(1..5)\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "minimum": 0,
+       "type": "integer"
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-range-min",
+   "schema": "t",
+   "short": "fields:\n  x: integer(0..)\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "maximum": 0.5,
+       "type": "number"
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-range-max-number",
+   "schema": "t",
+   "short": "fields:\n  x: number(..0.5)\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "$ref": "common.schema.json#/$defs/refString",
+       "ref": "person"
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-ref-one",
+   "schema": "t",
+   "short": "fields:\n  x: ref(person)\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "$ref": "common.schema.json#/$defs/refString",
+       "ref": [
+        "person",
+        "role"
+       ]
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-ref-several",
+   "schema": "t",
+   "short": "fields:\n  x: ref(person, role)\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "enum": [
+        "a",
+        "b, c",
+        "1",
+        ""
+       ],
+       "type": "string"
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-enum-strings",
+   "schema": "t",
+   "short": "fields:\n  x: enum(a, \"b, c\", \"1\", \"\")\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "enum": [
+        1,
+        2,
+        3
+       ],
+       "type": "integer"
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-enum-integers",
+   "schema": "t",
+   "short": "fields:\n  x: enum(1, 2, 3)\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "enum": [
+        1,
+        2.5
+       ],
+       "type": "number"
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-enum-numbers",
+   "schema": "t",
+   "short": "fields:\n  x: enum(1, 2.5)\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "enum": [
+        1,
+        "a"
+       ]
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-enum-mixed",
+   "schema": "t",
+   "short": "fields:\n  x: enum(1, a)\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "enum": [
+        "a (b)",
+        "c"
+       ],
+       "type": "string"
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-enum-quoted-parenthesis",
+   "schema": "t",
+   "short": "fields:\n  x: enum(\"a (b)\", c)\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "$ref": "common.schema.json#/$defs/slug"
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-common-name",
+   "schema": "t",
+   "short": "fields:\n  x: slug\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "$ref": "common.schema.json#/$defs/string"
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-common-reserved-name",
+   "schema": "t",
+   "short": "fields:\n  x: common.string\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "$ref": "vendor.schema.json#/$defs/tier"
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-other-schema-name",
+   "schema": "t",
+   "short": "fields:\n  x: vendor.tier\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "$ref": "#/$defs/local"
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-own-schema-name",
+   "schema": "t",
+   "short": "fields:\n  x: t.local\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-list",
+   "schema": "t",
+   "short": "fields:\n  x: string[]\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "format": "date",
+       "type": [
+        "string",
+        "null"
+       ]
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-nullable-type",
+   "schema": "t",
+   "short": "fields:\n  x: string(date)?\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "enum": [
+        "a",
+        "b",
+        null
+       ],
+       "type": [
+        "string",
+        "null"
+       ]
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-nullable-enum",
+   "schema": "t",
+   "short": "fields:\n  x: enum(a, b)?\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "anyOf": [
+        {
+         "$ref": "common.schema.json#/$defs/refString",
+         "ref": "person"
+        },
+        {
+         "type": "null"
+        }
+       ]
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-nullable-ref",
+   "schema": "t",
+   "short": "fields:\n  x: ref(person)?\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "anyOf": [
+        {
+         "$ref": "common.schema.json#/$defs/date"
+        },
+        {
+         "type": "null"
+        }
+       ]
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-nullable-name",
+   "schema": "t",
+   "short": "fields:\n  x: date?\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "items": {
+        "type": "string"
+       },
+       "type": [
+        "array",
+        "null"
+       ]
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-nullable-list",
+   "schema": "t",
+   "short": "fields:\n  x: string[]?\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "items": {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "type": "array"
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-list-of-nullable",
+   "schema": "t",
+   "short": "fields:\n  x: string?[]\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "type": [
+        "string",
+        "integer"
+       ]
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-union-primitives",
+   "schema": "t",
+   "short": "fields:\n  x: string|integer\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "$ref": "common.schema.json#/$defs/refString",
+         "ref": "person"
+        }
+       ]
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-union-mixed",
+   "schema": "t",
+   "short": "fields:\n  x: string|ref(person)\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "items": {
+        "type": [
+         "string",
+         "integer"
+        ]
+       },
+       "type": "array"
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-group",
+   "schema": "t",
+   "short": "fields:\n  x: (string|integer)[]\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "type": [
+        "string",
+        "integer",
+        "null"
+       ]
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-group-nullable",
+   "schema": "t",
+   "short": "fields:\n  x: (string|integer)?\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "description": "Free text: anything goes.",
+       "type": "string"
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-description",
+   "schema": "t",
+   "short": "fields:\n  x: \"string -- Free text: anything goes.\"\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "$ref": "common.schema.json#/$defs/email",
+       "x-data": [
+        "user.contact.email.work",
+        "user.contact"
+       ]
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-labels",
+   "schema": "t",
+   "short": "fields:\n  x: email @user.contact.email.work @user.contact\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "$ref": "common.schema.json#/$defs/email",
+       "description": "Work email",
+       "x-data": [
+        "user.contact.email.work"
+       ]
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "expression-labels-description",
+   "schema": "t",
+   "short": "fields:\n  x: email @user.contact.email.work -- Work email\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$defs": {
+      "id": {
+       "$ref": "#/$defs/slug"
+      },
+      "owner": {
+       "$ref": "#/$defs/refString",
+       "ref": "person"
+      },
+      "slug": {
+       "pattern": "^[a-z]+$",
+       "type": "string"
+      }
+     },
+     "$schema": "https://json-schema.org/draft/2020-12/schema"
+    }
+   },
+   "name": "common-bare-name-is-local",
+   "schema": "common",
+   "short": "defs:\n  slug: /^[a-z]+$/\n  id: slug\n  owner: ref(person)\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$defs": {
+      "tier": {
+       "enum": [
+        "a",
+        "b"
+       ],
+       "type": "string"
+      }
+     },
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "additionalProperties": false,
+     "description": "One vendor.",
+     "examples": [
+      {
+       "id": "acme",
+       "name": "Acme"
+      }
+     ],
+     "properties": {
+      "id": {
+       "$ref": "common.schema.json#/$defs/slug"
+      },
+      "name": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "id"
+     ],
+     "title": "vendor",
+     "type": "object"
+    }
+   },
+   "name": "document-keys",
+   "schema": "vendor",
+   "short": "title: vendor\ndescription: One vendor.\nfields:\n  id: slug\n  name?: string\ndefs:\n  tier: enum(a, b)\nexamples:\n  - id: acme\n    name: Acme\njson:\n  additionalProperties: false\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema"
+    }
+   },
+   "name": "document-empty-mapping",
+   "schema": "t",
+   "short": "{}\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "language": {
+       "description": "A language code.\nTwo or more letters.\n",
+       "examples": [
+        "GO",
+        "JS"
+       ],
+       "minLength": 2,
+       "pattern": "^[A-Z]+$",
+       "type": "string"
+      }
+     },
+     "required": [
+      "language"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "field-mapping-keys",
+   "schema": "t",
+   "short": "fields:\n  language:\n    description: |\n      A language code.\n      Two or more letters.\n    type: /^[A-Z]+$/\n    examples: [GO, JS]\n    json:\n      minLength: 2\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "locations": {
+       "items": {
+        "properties": {
+         "action": {
+          "enum": [
+           "monitor",
+           "warn"
+          ],
+          "type": "string"
+         },
+         "artifact": {
+          "properties": {
+           "artifactId": {
+            "type": [
+             "string",
+             "null"
+            ]
+           },
+           "name": {
+            "type": "string"
+           }
+          },
+          "required": [
+           "artifactId",
+           "name"
+          ],
+          "type": "object"
+         }
+        },
+        "required": [
+         "action"
+        ],
+        "type": "object"
+       },
+       "type": "array"
+      }
+     },
+     "required": [
+      "locations"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "field-items-of-objects",
+   "schema": "t",
+   "short": "fields:\n  locations:\n    items:\n      fields:\n        action: enum(monitor, warn)\n        artifact?:\n          fields:\n            name: string\n            artifactId: string?\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "scope": {
+       "properties": {
+        "kind": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "kind"
+       ],
+       "type": [
+        "object",
+        "null"
+       ]
+      }
+     },
+     "type": "object"
+    }
+   },
+   "name": "field-nullable-object",
+   "schema": "t",
+   "short": "fields:\n  scope?:\n    type: object?\n    fields:\n      kind: string\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "value": {
+       "const": 3
+      }
+     },
+     "required": [
+      "value"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "field-json-only",
+   "schema": "t",
+   "short": "fields:\n  value:\n    json:\n      const: 3\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "cleared_at": {
+       "format": "date-time",
+       "type": [
+        "string",
+        "null"
+       ]
+      }
+     },
+     "type": "object"
+    }
+   },
+   "name": "optional-and-nullable",
+   "schema": "t",
+   "short": "fields:\n  cleared_at?: string(date-time)?\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 2,
+      "message": "unknown key kind",
+      "path": "kind"
+     }
+    ]
+   },
+   "name": "error-unknown-document-key",
+   "schema": "t",
+   "short": "title: t\nkind: t\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 4,
+      "message": "unknown key format",
+      "path": "fields.a.format"
+     }
+    ]
+   },
+   "name": "error-unknown-field-key",
+   "schema": "t",
+   "short": "fields:\n  a:\n    type: string\n    format: date\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 2,
+      "message": "unexpected g in `strin g`",
+      "path": "fields.a"
+     }
+    ]
+   },
+   "name": "error-bad-expression",
+   "schema": "t",
+   "short": "fields:\n  a: strin g\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 2,
+      "message": "unclosed ( in `enum(a, b`",
+      "path": "fields.a"
+     }
+    ]
+   },
+   "name": "error-unclosed",
+   "schema": "t",
+   "short": "fields:\n  a: enum(a, b\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 6,
+      "message": "type is already set",
+      "path": "fields.scope.json.type"
+     }
+    ]
+   },
+   "name": "error-json-clash",
+   "schema": "t",
+   "short": "fields:\n  scope:\n    fields:\n      kind: string\n    json:\n      type: array\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 2,
+      "message": "items can't go with type",
+      "path": "fields.a"
+     }
+    ]
+   },
+   "name": "error-items-with-type",
+   "schema": "t",
+   "short": "fields:\n  a:\n    type: string\n    items: string\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 2,
+      "message": "items can't go with fields",
+      "path": "fields.a"
+     }
+    ]
+   },
+   "name": "error-items-with-fields",
+   "schema": "t",
+   "short": "fields:\n  a:\n    fields:\n      b: string\n    items: string\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 3,
+      "message": "next to fields, type can only be object?",
+      "path": "fields.a.type"
+     }
+    ]
+   },
+   "name": "error-object-type-next-to-fields",
+   "schema": "t",
+   "short": "fields:\n  a:\n    type: string\n    fields:\n      b: string\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 2,
+      "message": "enum values are quoted with double quotes: write \"\", not '' in `enum('', auto)`",
+      "path": "fields.a"
+     }
+    ]
+   },
+   "name": "error-single-quoted-enum",
+   "schema": "t",
+   "short": "fields:\n  a: enum('', auto)\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 2,
+      "message": "null can't be an enum value; to allow null, put ? after enum(...) in `enum(a, null)`",
+      "path": "fields.a"
+     }
+    ]
+   },
+   "name": "error-null-in-enum",
+   "schema": "t",
+   "short": "fields:\n  a: enum(a, null)\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 2,
+      "message": "enum values are quoted with double quotes: write \"x\", not 'x' in `enum('x')`",
+      "path": "fields.a"
+     },
+     {
+      "line": 4,
+      "message": "a isn't a number in `integer(a..b)`",
+      "path": "fields.c"
+     },
+     {
+      "line": 6,
+      "message": "unknown key nested",
+      "path": "fields.d.nested"
+     }
+    ]
+   },
+   "name": "error-every-bad-field",
+   "schema": "t",
+   "short": "fields:\n  a: enum('x')\n  b: string\n  c: integer(a..b)\n  d:\n    nested: string\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 2,
+      "message": "ref kind Person must be lowercase letters and hyphens in `ref(Person)`",
+      "path": "fields.a"
+     }
+    ]
+   },
+   "name": "error-ref-kind",
+   "schema": "t",
+   "short": "fields:\n  a: ref(Person)\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 2,
+      "message": "expected a type expression or a mapping",
+      "path": "fields.a"
+     }
+    ]
+   },
+   "name": "error-field-not-a-type",
+   "schema": "t",
+   "short": "fields:\n  a: 3\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 3,
+      "message": "a is listed twice",
+      "path": "fields.a?"
+     }
+    ]
+   },
+   "name": "error-twice",
+   "schema": "t",
+   "short": "fields:\n  a: string\n  a?: string\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 2,
+      "message": "an example row must be a mapping",
+      "path": "examples[0]"
+     }
+    ]
+   },
+   "name": "error-example-row",
+   "schema": "t",
+   "short": "examples:\n  - a\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 3,
+      "message": "while parsing a flow sequence, expected ',' or ']'",
+      "path": ""
+     }
+    ]
+   },
+   "name": "error-yaml",
+   "schema": "t",
+   "short": "fields:\n  a: [string\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 1,
+      "message": "a short-form schema must be a mapping",
+      "path": ""
+     }
+    ]
+   },
+   "name": "error-not-a-mapping",
+   "schema": "t",
+   "short": "- a\n"
+  },
+  {
+   "body": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": true,
+    "examples": [
+     {
+      "alpha": null,
+      "code": "GO",
+      "extra": 1,
+      "zeta": "z"
+     }
+    ],
+    "properties": {
+     "alpha": {
+      "format": "date-time",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "code": {
+      "examples": [
+       "GO",
+       "JS"
+      ],
+      "minLength": 2,
+      "type": "string"
+     },
+     "items": {
+      "items": {
+       "properties": {
+        "a": {
+         "type": "integer"
+        },
+        "b": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "b"
+       ],
+       "type": "object"
+      },
+      "type": "array"
+     },
+     "maybe": {
+      "anyOf": [
+       {
+        "$ref": "common.schema.json#/$defs/date"
+       },
+       {
+        "type": "null"
+       }
+      ]
+     },
+     "notes": {
+      "description": "Two\nlines.",
+      "type": "string"
+     },
+     "odd": {
+      "const": 3
+     },
+     "zeta": {
+      "description": "Last required.",
+      "type": "string"
+     }
+    },
+    "required": [
+     "zeta",
+     "alpha"
+    ],
+    "title": "t",
+    "type": "object"
+   },
+   "expect": {
+    "short": "title: t\nfields:\n  alpha: string(date-time)?\n  zeta: string -- Last required.\n  code?:\n    type: string\n    examples: [GO, JS]\n    json:\n      minLength: 2\n  items?:\n    items:\n      fields:\n        b: string\n        a?: integer\n  maybe?: date?\n  notes?:\n    description: \"Two\\nlines.\"\n    type: string\n  odd?:\n    json:\n      const: 3\nexamples:\n  - alpha: null\n    zeta: z\n    code: GO\n    extra: 1\n"
+   },
+   "name": "generate-order-and-forms",
+   "schema": "t"
+  },
+  {
+   "body": {
+    "$id": "t.schema.json",
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "string"
+   },
+   "expect": {
+    "short": "json:\n  $id: t.schema.json\n  $schema: http://json-schema.org/draft-07/schema#\n  type: string\n"
+   },
+   "name": "generate-other-schema-keeps-id",
+   "schema": "t"
+  }
+ ],
+ "description": "Schema language: `short` expanded for the schema named `schema`, with `options` when given (defaults otherwise), gives `expect.body` or `expect.problems`; `body` generates `expect.short`. Bodies are compared as JSON values."
+}
