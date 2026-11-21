@@ -10,8 +10,7 @@ Status: early. Nothing here is released yet.
 |---|---|
 | [crates/legible](crates/legible) | `legible`, the command-line tool |
 | [crates/legible-records](crates/legible-records) | The Rust library the tool is built on |
-
-An npm package, built from the same Rust code as WebAssembly, is planned.
+| [crates/legible-records-wasm](crates/legible-records-wasm) and [packages/legible](packages/legible) | `@legiblerecords/legible`, the same code as WebAssembly for JavaScript |
 
 ## The command-line tool
 
@@ -37,7 +36,7 @@ legible validate -s appetite.json decision.json
 
 Exit status is 0 when everything passes, 1 when the input has problems, and 2 when the tool couldn't run. `validate` never fetches anything: every schema it needs is given with `-s`, and `org.legiblerecords.common` version 1 is built in.
 
-Both implement the [spec](https://github.com/legiblerecords/spec), and are tested against its vectors: `crates/legible-records/tests/vectors/` holds a copy, and `SOURCE` says which spec commit it came from.
+All of them implement the [spec](https://github.com/legiblerecords/spec), and are tested against its vectors: `crates/legible-records/tests/vectors/` holds a copy, and `SOURCE` says which spec commit it came from.
 
 ## Contributing and security
 

@@ -1,0 +1,19 @@
+[package]
+name = "legible-records-wasm"
+description = "WebAssembly bindings for legible-records, published to npm as @legiblerecords/legible"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+legible-records = { workspace = true, default-features = false }
+serde_json.workspace = true
+serde = "1"
+serde-wasm-bindgen = "0.6"
+wasm-bindgen = "0.2"

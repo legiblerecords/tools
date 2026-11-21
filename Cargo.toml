@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/legible-records", "crates/legible"]
+members = ["crates/legible-records", "crates/legible", "crates/legible-records-wasm"]
 
 [workspace.package]
 version = "0.1.0"
