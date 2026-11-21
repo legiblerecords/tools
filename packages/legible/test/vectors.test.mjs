@@ -6,7 +6,7 @@ import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
 
 const require = createRequire(import.meta.url);
-const legible = require("../dist/node/legible_records_wasm.cjs");
+const legible = require("../dist/legible_records_wasm.cjs");
 
 const vectors = (name) =>
   JSON.parse(
@@ -66,4 +66,12 @@ test("lint and checkCompat", () => {
     legible.lint({ type: "object", additionalProperties: false }).map((f) => f.pointer),
     ["", "/additionalProperties"],
   );
+});
+
+test("the web build loads the same module", async () => {
+  const web = await import("../dist/legible_records_wasm.js");
+  const bytes = readFileSync(new URL("../dist/legible_records_wasm_bg.wasm", import.meta.url));
+  await web.default({ module_or_path: bytes });
+  const result = web.expand("fields:\n  x: known(a)\n", "t");
+  assert.deepEqual(result.body.properties.x, { type: "string", examples: ["a"] });
 });

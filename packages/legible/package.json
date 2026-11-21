@@ -8,19 +8,35 @@
     "url": "git+https://github.com/legiblerecords/tools.git",
     "directory": "packages/legible"
   },
-  "keywords": ["legible-records", "json-schema", "security", "schema"],
+  "keywords": [
+    "legible-records",
+    "json-schema",
+    "security",
+    "schema"
+  ],
   "type": "module",
   "exports": {
     ".": {
-      "types": "./dist/web/legible_records_wasm.d.ts",
-      "node": "./dist/node/legible_records_wasm.cjs",
-      "default": "./dist/web/legible_records_wasm.js"
+      "node": {
+        "types": "./dist/legible_records_wasm.d.cts",
+        "default": "./dist/legible_records_wasm.cjs"
+      },
+      "default": {
+        "types": "./dist/legible_records_wasm.d.ts",
+        "default": "./dist/legible_records_wasm.js"
+      }
     }
   },
-  "types": "./dist/web/legible_records_wasm.d.ts",
-  "files": ["dist/", "README.md", "LICENSE"],
+  "types": "./dist/legible_records_wasm.d.ts",
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
   "sideEffects": false,
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "sh build.sh",
     "test": "node --test test/vectors.test.mjs"
