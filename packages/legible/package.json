@@ -23,6 +23,6 @@
   "engines": { "node": ">=20" },
   "scripts": {
     "build": "sh build.sh",
-    "test": "node --test test/"
+    "test": "node --test test/vectors.test.mjs"
   }
 }

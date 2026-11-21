@@ -12,6 +12,6 @@ name = "legible"
 path = "src/main.rs"
 
 [dependencies]
-legible-records.workspace = true
+legible-records = { workspace = true, features = ["validate"] }
 serde_json.workspace = true
 clap.workspace = true
