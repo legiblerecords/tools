@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/legible-records", "crates/legible"]
+members = ["crates/legible-records", "crates/legible", "crates/legible-records-wasm"]
 
 [workspace.package]
 version = "0.1.0"
@@ -14,4 +14,15 @@ serde_json = "1"
 yaml-rust2 = "0.13"
 jsonschema = { version = "=0.58.0", default-features = false }
 clap = { version = "4", features = ["derive"] }
-legible-records = { path = "crates/legible-records", version = "0.1.0" }
+legible-records = { path = "crates/legible-records", version = "0.1.0", default-features = false }
+
+# The WebAssembly build for npm: smallest code over fastest, since it is
+# downloaded by browsers. The CLI keeps the normal release profile.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+# Not strip: wasm-bindgen and wasm-opt need the target_features section to
+# know which WebAssembly features are in use. build.sh strips after wasm-opt.

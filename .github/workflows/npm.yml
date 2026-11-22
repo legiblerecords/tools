@@ -1,0 +1,48 @@
+name: npm
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
+      - name: Install wasm-bindgen-cli at the version in Cargo.lock
+        run: |
+          version=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/"/, "", $3); print $3; exit }' Cargo.lock)
+          echo "wasm-bindgen $version"
+          cargo install wasm-bindgen-cli --version "$version" --locked
+      - run: sudo apt-get update && sudo apt-get install -y binaryen
+      - run: npm run build
+        working-directory: packages/legible
+      - run: npm test
+        working-directory: packages/legible
+      - name: Report sizes
+        working-directory: packages/legible
+        run: |
+          {
+            echo "## Package size"
+            echo
+            echo "| What | Bytes |"
+            echo "|---|---|"
+            f=dist/legible_records_wasm_bg.wasm
+            echo "| .wasm | $(stat -c %s "$f") |"
+            echo "| .wasm, gzipped | $(gzip -9 -c "$f" | wc -c) |"
+            npm pack --dry-run --json > pack.json
+            echo "| npm tarball | $(node -p 'require("./pack.json")[0].size') |"
+            echo "| installed (unpacked) | $(node -p 'require("./pack.json")[0].unpackedSize') |"
+            echo
+            echo "Files: $(node -p 'require("./pack.json")[0].files.map(f => f.path).join(", ")')"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
