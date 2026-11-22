@@ -1,0 +1,20 @@
+[package]
+name = "legible-records"
+description = "Legible Records: the schema language, published-type lint, compatibility check and record validation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords = ["json-schema", "security", "records", "schema"]
+
+[features]
+default = ["validate"]
+# Validating records against JSON Schema. Off for the WebAssembly build,
+# where JavaScript validators do this job.
+validate = ["dep:jsonschema"]
+
+[dependencies]
+serde_json.workspace = true
+yaml-rust2.workspace = true
+jsonschema = { workspace = true, optional = true }

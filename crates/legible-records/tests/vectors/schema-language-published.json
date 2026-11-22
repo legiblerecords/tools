@@ -1,0 +1,297 @@
+{
+ "cases": [
+  {
+   "expect": {
+    "body": {
+     "$id": "https://example.org/schemas/org.example.thing/v1.json",
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "$type": {
+       "const": "org.example.thing"
+      },
+      "version": {
+       "const": 1
+      }
+     },
+     "required": [
+      "$type",
+      "version"
+     ],
+     "title": "thing",
+     "type": "object"
+    }
+   },
+   "name": "published-minimal",
+   "options": {
+    "base": "https://example.org/schemas/"
+   },
+   "schema": "thing",
+   "short": "type: org.example.thing\nversion: 1\ntitle: thing\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$id": "https://example.org/schemas/org.example.thing/v2.json",
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "$type": {
+       "const": "org.example.thing"
+      },
+      "id": {
+       "$ref": "https://legiblerecords.org/schemas/org.legiblerecords.common/v1.json#/$defs/slug"
+      },
+      "level": {
+       "examples": [
+        "serious",
+        "existential"
+       ],
+       "type": "string"
+      },
+      "note": {
+       "type": "string"
+      },
+      "version": {
+       "const": 2
+      }
+     },
+     "required": [
+      "$type",
+      "version",
+      "id",
+      "level"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "published-fields-known-common",
+   "options": {
+    "base": "https://example.org/schemas/",
+    "common": "https://legiblerecords.org/schemas/org.legiblerecords.common/v1.json"
+   },
+   "schema": "thing",
+   "short": "type: org.example.thing\nversion: 2\nfields:\n  id: slug\n  level: known(serious, existential)\n  note?: string\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "examples": [
+        "a"
+       ],
+       "type": "string"
+      }
+     },
+     "required": [
+      "x"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "known-unpublished",
+   "schema": "t",
+   "short": "fields:\n  x: known(a)\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "x": {
+       "examples": [
+        "a",
+        "b c"
+       ],
+       "type": [
+        "string",
+        "null"
+       ]
+      }
+     },
+     "type": "object"
+    }
+   },
+   "name": "known-nullable-quoted",
+   "schema": "t",
+   "short": "fields:\n  x?: known(a, \"b c\")?\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 1,
+      "message": "version needs type",
+      "path": "version"
+     }
+    ]
+   },
+   "name": "error-version-without-type",
+   "schema": "t",
+   "short": "version: 1\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 1,
+      "message": "type needs version",
+      "path": "type"
+     }
+    ]
+   },
+   "name": "error-type-without-version",
+   "options": {
+    "base": "https://example.org/schemas/"
+   },
+   "schema": "t",
+   "short": "type: org.example.thing\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 1,
+      "message": "bad type identifier Thing",
+      "path": "type"
+     }
+    ]
+   },
+   "name": "error-bad-type-identifier",
+   "options": {
+    "base": "https://example.org/schemas/"
+   },
+   "schema": "t",
+   "short": "type: Thing\nversion: 1\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 2,
+      "message": "version must be an integer of 1 or more",
+      "path": "version"
+     }
+    ]
+   },
+   "name": "error-version-not-integer",
+   "options": {
+    "base": "https://example.org/schemas/"
+   },
+   "schema": "t",
+   "short": "type: org.example.thing\nversion: one\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 1,
+      "message": "a published type needs the base option",
+      "path": "type"
+     }
+    ]
+   },
+   "name": "error-missing-base",
+   "schema": "t",
+   "short": "type: org.example.thing\nversion: 1\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 2,
+      "message": "known values must be strings in `known(a, 1)`",
+      "path": "fields.x"
+     }
+    ]
+   },
+   "name": "error-known-number",
+   "schema": "t",
+   "short": "fields:\n  x: known(a, 1)\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 4,
+      "message": "version is set by the published type",
+      "path": "fields.version"
+     }
+    ]
+   },
+   "name": "error-reserved-field",
+   "options": {
+    "base": "https://example.org/schemas/"
+   },
+   "schema": "t",
+   "short": "type: org.example.thing\nversion: 1\nfields:\n  version: string\n"
+  },
+  {
+   "body": {
+    "$id": "https://example.org/schemas/org.example.thing/v2.json",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+     "$type": {
+      "const": "org.example.thing"
+     },
+     "id": {
+      "$ref": "https://legiblerecords.org/schemas/org.legiblerecords.common/v1.json#/$defs/slug"
+     },
+     "level": {
+      "examples": [
+       "serious",
+       "existential"
+      ],
+      "type": "string"
+     },
+     "note": {
+      "type": "string"
+     },
+     "version": {
+      "const": 2
+     }
+    },
+    "required": [
+     "$type",
+     "version",
+     "id",
+     "level"
+    ],
+    "type": "object"
+   },
+   "expect": {
+    "short": "type: org.example.thing\nversion: 2\nfields:\n  id: slug\n  level: known(serious, existential)\n  note?: string\n"
+   },
+   "name": "generate-published",
+   "options": {
+    "base": "https://example.org/schemas/",
+    "common": "https://legiblerecords.org/schemas/org.legiblerecords.common/v1.json"
+   },
+   "schema": "thing"
+  },
+  {
+   "body": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+     "x": {
+      "examples": [
+       "a",
+       "b"
+      ],
+      "type": "string"
+     }
+    },
+    "required": [
+     "x"
+    ],
+    "type": "object"
+   },
+   "expect": {
+    "short": "fields:\n  x:\n    type: string\n    examples: [a, b]\n"
+   },
+   "name": "generate-unpublished-examples-stay",
+   "schema": "t"
+  }
+ ],
+ "description": "Published types and known(): as schema-language.json, with `options` (`base`, `common`) where a case gives them."
+}
