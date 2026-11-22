@@ -291,6 +291,191 @@
    },
    "name": "generate-unpublished-examples-stay",
    "schema": "t"
+  },
+  {
+   "expect": {
+    "body": {
+     "$defs": {
+      "range": {
+       "properties": {
+        "p05": {
+         "type": "number"
+        },
+        "p95": {
+         "type": "number"
+        }
+       },
+       "required": [
+        "p05",
+        "p95"
+       ],
+       "type": "object"
+      }
+     },
+     "$id": "https://example.org/schemas/org.example.thing/v1.json",
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "$type": {
+       "const": "org.example.thing"
+      },
+      "high": {
+       "$ref": "#/$defs/range"
+      },
+      "low": {
+       "$ref": "#/$defs/range"
+      },
+      "version": {
+       "const": 1
+      }
+     },
+     "required": [
+      "$type",
+      "version",
+      "low"
+     ],
+     "title": "thing",
+     "type": "object"
+    }
+   },
+   "name": "published-title-names-own-defs",
+   "options": {
+    "base": "https://example.org/schemas/",
+    "common": "https://legiblerecords.org/schemas/org.legiblerecords.common/v1.json"
+   },
+   "schema": "v1",
+   "short": "type: org.example.thing\nversion: 1\ntitle: thing\nfields:\n  low: thing.range\n  high?: thing.range\ndefs:\n  range:\n    fields:\n      p05: number\n      p95: number\n"
+  },
+  {
+   "body": {
+    "$defs": {
+     "range": {
+      "properties": {
+       "p05": {
+        "type": "number"
+       },
+       "p95": {
+        "type": "number"
+       }
+      },
+      "required": [
+       "p05",
+       "p95"
+      ],
+      "type": "object"
+     }
+    },
+    "$id": "https://example.org/schemas/org.example.thing/v1.json",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+     "$type": {
+      "const": "org.example.thing"
+     },
+     "high": {
+      "$ref": "#/$defs/range"
+     },
+     "low": {
+      "$ref": "#/$defs/range"
+     },
+     "version": {
+      "const": 1
+     }
+    },
+    "required": [
+     "$type",
+     "version",
+     "low"
+    ],
+    "title": "thing",
+    "type": "object"
+   },
+   "expect": {
+    "short": "type: org.example.thing\nversion: 1\ntitle: thing\nfields:\n  low: thing.range\n  high?: thing.range\ndefs:\n  range:\n    fields:\n      p05: number\n      p95: number\n"
+   },
+   "name": "generate-published-title-names-own-defs",
+   "options": {
+    "base": "https://example.org/schemas/",
+    "common": "https://legiblerecords.org/schemas/org.legiblerecords.common/v1.json"
+   },
+   "schema": "v1"
+  },
+  {
+   "expect": {
+    "body": {
+     "$defs": {
+      "range": {
+       "properties": {
+        "p05": {
+         "type": "number"
+        }
+       },
+       "required": [
+        "p05"
+       ],
+       "type": "object"
+      }
+     },
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "low": {
+       "$ref": "thing.schema.json#/$defs/range"
+      }
+     },
+     "required": [
+      "low"
+     ],
+     "title": "thing",
+     "type": "object"
+    }
+   },
+   "name": "unpublished-title-names-nothing",
+   "schema": "v1",
+   "short": "title: thing\nfields:\n  low: thing.range\ndefs:\n  range:\n    fields:\n      p05: number\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$defs": {
+      "range": {
+       "properties": {
+        "p05": {
+         "type": "number"
+        }
+       },
+       "required": [
+        "p05"
+       ],
+       "type": "object"
+      }
+     },
+     "$id": "https://example.org/schemas/org.example.thing/v1.json",
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "$type": {
+       "const": "org.example.thing"
+      },
+      "low": {
+       "$ref": "#/$defs/range"
+      },
+      "version": {
+       "const": 1
+      }
+     },
+     "required": [
+      "$type",
+      "version",
+      "low"
+     ],
+     "title": "The thing",
+     "type": "object"
+    }
+   },
+   "name": "published-title-not-a-name",
+   "options": {
+    "base": "https://example.org/schemas/",
+    "common": "https://legiblerecords.org/schemas/org.legiblerecords.common/v1.json"
+   },
+   "schema": "v1",
+   "short": "type: org.example.thing\nversion: 1\ntitle: The thing\nfields:\n  low: v1.range\ndefs:\n  range:\n    fields:\n      p05: number\n"
   }
  ],
  "description": "Published types and known(): as schema-language.json, with `options` (`base`, `common`) where a case gives them."

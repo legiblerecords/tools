@@ -150,10 +150,16 @@ pub fn generate(body: &Value, name: &str, options: &Options) -> Result<String, S
     let Some(object) = body.as_object() else {
         return Err("a schema body must be an object".to_owned());
     };
+    let published = published_parts(object, options).is_some();
+    // A published type refers to its own definitions by its title.
+    let own = match object.get("title").and_then(Value::as_str) {
+        Some(title) if published && is_schema_name(title) => title,
+        _ => name,
+    };
     let generator = Generator {
-        own: name,
+        own,
         options,
-        published: published_parts(object, options).is_some(),
+        published,
     };
     let doc = generator.document(object);
     Ok(emit_document(&doc))
@@ -163,6 +169,8 @@ pub fn generate(body: &Value, name: &str, options: &Options) -> Result<String, S
 
 struct Expander<'a> {
     own: &'a str,
+    /// A published type's title, which also names the schema itself.
+    title: Option<String>,
     root: Loc,
     lines: Option<&'a BTreeMap<String, usize>>,
     options: &'a Options,
@@ -208,6 +216,7 @@ impl<'a> Expander<'a> {
     fn new(own: &'a str, lines: Option<&'a BTreeMap<String, usize>>, options: &'a Options) -> Self {
         Expander {
             own,
+            title: None,
             root: Loc::root(),
             lines,
             options,
@@ -248,6 +257,13 @@ impl<'a> Expander<'a> {
         }
         let published = self.published_type(doc, &root);
         self.published = doc.contains_key("type");
+        if self.published {
+            self.title = doc
+                .get("title")
+                .and_then(Value::as_str)
+                .filter(|title| is_schema_name(title))
+                .map(str::to_owned);
+        }
         for key in ["title", "description"] {
             if let Some(value) = doc.get(key) {
                 if value.is_string() {
@@ -545,6 +561,7 @@ impl<'a> Expander<'a> {
             i: 0,
             depth: 0,
             own: self.own,
+            title: self.title.as_deref(),
             options: self.options,
         };
         match parser.parse() {
@@ -563,6 +580,7 @@ struct ExprParser<'a> {
     i: usize,
     depth: usize,
     own: &'a str,
+    title: Option<&'a str>,
     options: &'a Options,
 }
 
@@ -815,7 +833,7 @@ impl ExprParser<'_> {
     }
 
     fn target(&self, schema: &str, name: &str) -> String {
-        if schema == self.own {
+        if schema == self.own || Some(schema) == self.title {
             format!("#/$defs/{name}")
         } else {
             format!("{}#/$defs/{name}", self.options.location_of(schema))
@@ -948,6 +966,12 @@ fn is_label_key(key: &str) -> bool {
                     .chars()
                     .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
         })
+}
+
+/// A name a published type's title can give the schema itself: a word
+/// without dots, so `<title>.<name>` reads as a reference to it.
+fn is_schema_name(title: &str) -> bool {
+    is_word(title) && !title.contains('.')
 }
 
 fn is_word(word: &str) -> bool {
