@@ -1,6 +1,7 @@
 //! Legible Records (<https://github.com/legiblerecords/spec>): legible,
 //! portable, pragmatic security records.
 //!
+//! - [`bundle`]: packing, opening and verifying bundles;
 //! - [`short_form`]: the schema language, expanding short-form schemas to
 //!   JSON Schema 2020-12 and generating them back;
 //! - [`yaml`]: the restricted YAML the short form is written in;
@@ -10,6 +11,7 @@
 //! - [`validate`]: validates records against their types (feature
 //!   `validate`).
 
+pub mod bundle;
 pub mod compat;
 pub mod lint;
 pub mod short_form;

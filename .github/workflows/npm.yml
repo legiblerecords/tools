@@ -25,6 +25,8 @@ jobs:
           echo "wasm-bindgen $version"
           cargo install wasm-bindgen-cli --version "$version" --locked
       - run: sudo apt-get update && sudo apt-get install -y binaryen
+      - run: npm ci --ignore-scripts
+        working-directory: packages/legible
       - run: npm run build
         working-directory: packages/legible
       - run: npm test

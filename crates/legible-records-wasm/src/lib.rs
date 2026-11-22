@@ -7,7 +7,7 @@
 //! Schema 2020-12.
 
 use legible_records::short_form::{self, Options};
-use legible_records::{compat, lint, yaml};
+use legible_records::{bundle, compat, lint, yaml};
 use serde::Serialize;
 use serde_json::Value;
 use wasm_bindgen::prelude::*;
@@ -153,5 +153,138 @@ pub fn parse_yaml(text: &str) -> Result<JsValue, JsError> {
                 "message": error.message,
             }
         })),
+    }
+}
+
+/// The bundled `org.legiblerecords.common` version 1 schema.
+#[wasm_bindgen(js_name = commonSchema)]
+pub fn common_schema() -> Result<JsValue, JsError> {
+    let common: Value = serde_json::from_str(legible_records::COMMON_V1)
+        .expect("the bundled common schema is JSON");
+    to_js(&common)
+}
+
+fn schema_list(schemas: JsValue) -> Result<Vec<Value>, JsError> {
+    if schemas.is_undefined() || schemas.is_null() {
+        return Ok(Vec::new());
+    }
+    match from_js(schemas, "schemas")? {
+        Value::Array(list) => Ok(list),
+        _ => Err(JsError::new("schemas must be an array")),
+    }
+}
+
+fn problems_error(problems: &[String]) -> JsError {
+    JsError::new(&problems.join("\n"))
+}
+
+/// Builds a bundle: `add` each file, then `finish`. A `.json` file with
+/// `$type` and `version` becomes a record; anything else an attachment.
+#[wasm_bindgen]
+#[derive(Default)]
+pub struct BundleBuilder {
+    inputs: Vec<bundle::Input>,
+}
+
+#[wasm_bindgen]
+impl BundleBuilder {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> BundleBuilder {
+        BundleBuilder::default()
+    }
+
+    /// Adds a file by its name and bytes.
+    pub fn add(&mut self, name: String, bytes: Vec<u8>) {
+        self.inputs.push(bundle::Input { name, bytes });
+    }
+
+    /// Packs the files. `schemas` (expanded, optional) give each record's
+    /// folder, its type's title; without one it's the type's last segment.
+    /// Throws with every problem, one per line.
+    pub fn finish(&self, schemas: JsValue, produced_by: JsValue) -> Result<PackedBundle, JsError> {
+        let schemas = schema_list(schemas)?;
+        let produced_by = if produced_by.is_undefined() || produced_by.is_null() {
+            None
+        } else {
+            Some(from_js(produced_by, "producedBy")?)
+        };
+        let packed =
+            bundle::pack(&self.inputs, &schemas, produced_by).map_err(|p| problems_error(&p))?;
+        Ok(PackedBundle { packed })
+    }
+}
+
+/// A packed bundle: its zip, its manifest, and its attachments as records
+/// refer to them.
+#[wasm_bindgen]
+pub struct PackedBundle {
+    packed: bundle::Packed,
+}
+
+#[wasm_bindgen]
+impl PackedBundle {
+    /// The zip's bytes.
+    pub fn zip(&self) -> Vec<u8> {
+        self.packed.zip.clone()
+    }
+
+    /// The manifest.
+    pub fn manifest(&self) -> Result<JsValue, JsError> {
+        to_js(&self.packed.manifest)
+    }
+
+    /// `[{ sha256, name, media_type }]`, for referring to the attachments from records.
+    pub fn attachments(&self) -> Result<JsValue, JsError> {
+        let list: Vec<Value> = self
+            .packed
+            .attachments
+            .iter()
+            .map(|a| serde_json::json!({"sha256": a.sha256, "name": a.name, "media_type": a.media_type}))
+            .collect();
+        to_js(&list)
+    }
+}
+
+/// An opened bundle. `Bundle.open` refuses unsafe paths, duplicates, and
+/// more than 10,000 files or 1 GiB of contents.
+#[wasm_bindgen]
+pub struct Bundle {
+    opened: bundle::Opened,
+}
+
+#[wasm_bindgen]
+impl Bundle {
+    /// Opens a bundle's zip. Throws with every problem, one per line.
+    pub fn open(zip: &[u8]) -> Result<Bundle, JsError> {
+        let opened =
+            bundle::open(zip, bundle::Limits::default()).map_err(|p| problems_error(&p))?;
+        Ok(Bundle { opened })
+    }
+
+    /// The manifest.
+    pub fn manifest(&self) -> Result<JsValue, JsError> {
+        to_js(&self.opened.manifest)
+    }
+
+    /// Every path in the bundle except the manifest, sorted.
+    pub fn paths(&self) -> Vec<String> {
+        self.opened.files.keys().cloned().collect()
+    }
+
+    /// A file's bytes, or `undefined`.
+    pub fn file(&self, path: &str) -> Option<Vec<u8>> {
+        self.opened.files.get(path).cloned()
+    }
+
+    /// Checks hashes, the file list and references. `schemas` are expanded
+    /// schemas; record references are checked for the types among them.
+    /// Returns `{ problems: string[], uncheckedTypes: string[] }`.
+    pub fn verify(&self, schemas: JsValue) -> Result<JsValue, JsError> {
+        let schemas = schema_list(schemas)?;
+        let report = bundle::verify(&self.opened, &schemas);
+        to_js(&serde_json::json!({
+            "problems": report.problems,
+            "uncheckedTypes": report.unchecked_types,
+        }))
     }
 }

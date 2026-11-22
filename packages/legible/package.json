@@ -1,7 +1,7 @@
 {
   "name": "@legiblerecords/legible",
   "version": "0.1.0",
-  "description": "Legible Records in JavaScript: expand and generate short-form schemas, lint published types, check compatibility. Built from the Rust tools as WebAssembly.",
+  "description": "Legible Records in JavaScript: expand and generate short-form schemas, lint published types, check compatibility, and pack, verify and encrypt bundles. Built from the Rust tools as WebAssembly.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -12,7 +12,8 @@
     "legible-records",
     "json-schema",
     "security",
-    "schema"
+    "schema",
+    "age"
   ],
   "type": "module",
   "exports": {
@@ -28,7 +29,11 @@
     }
   },
   "types": "./dist/legible_records_wasm.d.ts",
+  "bin": {
+    "legible": "bin/legible.mjs"
+  },
   "files": [
+    "bin/",
     "dist/",
     "README.md",
     "LICENSE"
@@ -39,6 +44,11 @@
   },
   "scripts": {
     "build": "sh build.sh",
-    "test": "node --test test/vectors.test.mjs"
+    "test": "node --test test/vectors.test.mjs test/cli.test.mjs"
+  },
+  "dependencies": {
+    "age-encryption": "^0.3.1",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1"
   }
 }
