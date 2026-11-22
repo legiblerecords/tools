@@ -73,7 +73,7 @@ test("pack, verify and unpack a plain bundle", () => {
   const dir = workspace();
   const packed = run(dir, ["bundle", "pack", "in", "-o", "b.zip", "-s", "control.yaml", ...BASE]);
   assert.equal(packed.status, 0, packed.stderr);
-  assert.match(packed.stderr, /attachment review\.pdf: \{"sha256":"[0-9a-f]{64}"/);
+  assert.match(packed.stderr, /attachment review\.pdf: \{"media_type":"application\/pdf","name":"review\.pdf","sha256":"[0-9a-f]{64}"\}/);
   const again = run(dir, ["bundle", "pack", "in", "-o", "c.zip", "-s", "control.yaml", ...BASE]);
   assert.equal(again.status, 0);
   assert.deepEqual(readFileSync(join(dir, "b.zip")), readFileSync(join(dir, "c.zip")), "the same files pack to the same bytes");
