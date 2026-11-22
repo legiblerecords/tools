@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
+use legible_records::bundle::{self, Input, Limits};
 use legible_records::short_form::{self, Options};
 use legible_records::validate::Schemas;
 use legible_records::{compat, lint, COMMON_V1_ID};
@@ -61,6 +62,52 @@ enum Command {
         /// Record files (.json).
         #[arg(required = true)]
         records: Vec<PathBuf>,
+        #[command(flatten)]
+        schema: SchemaArgs,
+    },
+    /// Pack, unpack and verify bundles. To encrypt one, pipe it through age.
+    #[command(subcommand)]
+    Bundle(BundleCommand),
+}
+
+#[derive(Subcommand)]
+enum BundleCommand {
+    /// Pack records (.json with $type and version) and attachments (anything else) into a bundle.
+    Pack {
+        /// Files, or directories to pack every file in.
+        #[arg(required = true)]
+        inputs: Vec<PathBuf>,
+        /// Where to write the bundle (.zip), or - for stdout.
+        #[arg(long, short = 'o')]
+        output: PathBuf,
+        /// Schemas (.yaml or .json) of the records' types: a record's folder is its type's
+        /// title, or the type's last segment when no schema is given.
+        #[arg(long = "schema", short = 's')]
+        schemas: Vec<PathBuf>,
+        #[command(flatten)]
+        schema: SchemaArgs,
+    },
+    /// Verify a bundle and write its files into a new or empty directory.
+    Unpack {
+        /// The bundle (.zip), or - for stdin.
+        bundle: PathBuf,
+        /// The directory to write into.
+        #[arg(long, short = 'd')]
+        directory: PathBuf,
+        /// Schemas for checking record references; see verify.
+        #[arg(long = "schema", short = 's')]
+        schemas: Vec<PathBuf>,
+        #[command(flatten)]
+        schema: SchemaArgs,
+    },
+    /// Check a bundle's hashes, file list and references.
+    Verify {
+        /// The bundle (.zip), or - for stdin.
+        bundle: PathBuf,
+        /// A schema (.yaml or .json) whose records' references to check; repeat for several.
+        /// Attachment references are always checked.
+        #[arg(long = "schema", short = 's')]
+        schemas: Vec<PathBuf>,
         #[command(flatten)]
         schema: SchemaArgs,
     },
@@ -218,7 +265,172 @@ fn run(command: Command) -> Result<(), Stop> {
             }
             outcome(ok)
         }
+        Command::Bundle(command) => run_bundle(command),
     }
+}
+
+fn run_bundle(command: BundleCommand) -> Result<(), Stop> {
+    match command {
+        BundleCommand::Pack {
+            inputs,
+            output,
+            schemas,
+            schema,
+        } => {
+            let bodies = load_schemas(&schemas, &schema)?;
+            let mut files = Vec::new();
+            for path in &inputs {
+                collect(path, &mut files)?;
+            }
+            let produced_by = serde_json::json!({
+                "app": "legible",
+                "version": env!("CARGO_PKG_VERSION"),
+            });
+            let packed = bundle::pack(&files, &bodies, Some(produced_by)).map_err(|problems| {
+                problems.iter().for_each(|p| eprintln!("{p}"));
+                Stop::Problems
+            })?;
+            write_output(&output, &packed.zip)?;
+            for a in &packed.attachments {
+                let reference = serde_json::json!({"sha256": a.sha256, "name": a.name, "media_type": a.media_type});
+                eprintln!("attachment {}: {reference}", a.name);
+            }
+            Ok(())
+        }
+        BundleCommand::Verify {
+            bundle: path,
+            schemas,
+            schema,
+        } => {
+            let opened = open_bundle(&path)?;
+            verify_bundle(&path, &opened, &schemas, &schema)
+        }
+        BundleCommand::Unpack {
+            bundle: path,
+            directory,
+            schemas,
+            schema,
+        } => {
+            let opened = open_bundle(&path)?;
+            verify_bundle(&path, &opened, &schemas, &schema)?;
+            let empty = match std::fs::read_dir(&directory) {
+                Ok(mut entries) => entries.next().is_none(),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+                Err(e) => return Err(Stop::Failed(format!("{}: {e}", directory.display()))),
+            };
+            if !empty {
+                return Err(Stop::Failed(format!(
+                    "{}: not empty; unpack into a new or empty directory",
+                    directory.display()
+                )));
+            }
+            let manifest =
+                serde_json::to_vec_pretty(&opened.manifest).expect("JSON values serialize");
+            let files = std::iter::once((bundle::MANIFEST, &manifest))
+                .chain(opened.files.iter().map(|(p, b)| (p.as_str(), b)));
+            for (relative, bytes) in files {
+                let target = directory.join(relative);
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| Stop::Failed(format!("{}: {e}", parent.display())))?;
+                }
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&target)
+                    .map_err(|e| Stop::Failed(format!("{}: {e}", target.display())))?;
+                std::io::Write::write_all(&mut file, bytes)
+                    .map_err(|e| Stop::Failed(format!("{}: {e}", target.display())))?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Reads a file, or every regular file under a directory, as bundle inputs.
+/// Symbolic links are skipped.
+fn collect(path: &Path, out: &mut Vec<Input>) -> Result<(), Stop> {
+    let failed = |e: std::io::Error| Stop::Failed(format!("{}: {e}", path.display()));
+    let kind = std::fs::symlink_metadata(path).map_err(failed)?.file_type();
+    if kind.is_dir() {
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(path)
+            .map_err(failed)?
+            .map(|entry| entry.map(|e| e.path()))
+            .collect::<Result<_, _>>()
+            .map_err(failed)?;
+        entries.sort();
+        for entry in entries {
+            collect(&entry, out)?;
+        }
+    } else if kind.is_file() {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| Stop::Failed(format!("{}: not a UTF-8 file name", path.display())))?;
+        out.push(Input {
+            name: name.to_owned(),
+            bytes: std::fs::read(path).map_err(failed)?,
+        });
+    }
+    Ok(())
+}
+
+fn read_input(path: &Path) -> Result<Vec<u8>, Stop> {
+    if path == Path::new("-") {
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::stdin(), &mut bytes)
+            .map_err(|e| Stop::Failed(format!("stdin: {e}")))?;
+        return Ok(bytes);
+    }
+    std::fs::read(path).map_err(|e| Stop::Failed(format!("{}: {e}", path.display())))
+}
+
+fn write_output(path: &Path, bytes: &[u8]) -> Result<(), Stop> {
+    if path == Path::new("-") {
+        return std::io::Write::write_all(&mut std::io::stdout(), bytes)
+            .map_err(|e| Stop::Failed(format!("stdout: {e}")));
+    }
+    std::fs::write(path, bytes).map_err(|e| Stop::Failed(format!("{}: {e}", path.display())))
+}
+
+fn open_bundle(path: &Path) -> Result<bundle::Opened, Stop> {
+    let bytes = read_input(path)?;
+    if bytes.starts_with(b"age-encryption.org/") || bytes.starts_with(b"-----BEGIN AGE") {
+        return Err(Stop::Failed(format!(
+            "{}: encrypted with age; decrypt it first (age -d)",
+            path.display()
+        )));
+    }
+    bundle::open(&bytes, Limits::default()).map_err(|problems| {
+        for problem in &problems {
+            println!("{}: {problem}", path.display());
+        }
+        Stop::Problems
+    })
+}
+
+fn load_schemas(paths: &[PathBuf], args: &SchemaArgs) -> Result<Vec<Value>, Stop> {
+    paths.iter().map(|path| load_schema(path, args)).collect()
+}
+
+fn verify_bundle(
+    path: &Path,
+    opened: &bundle::Opened,
+    schemas: &[PathBuf],
+    args: &SchemaArgs,
+) -> Result<(), Stop> {
+    let bodies = load_schemas(schemas, args)?;
+    let report = bundle::verify(opened, &bodies);
+    for problem in &report.problems {
+        println!("{}: {problem}", path.display());
+    }
+    for kind in &report.unchecked_types {
+        eprintln!(
+            "{}: no schema given for {kind}; its references weren't checked",
+            path.display()
+        );
+    }
+    outcome(report.problems.is_empty())
 }
 
 fn outcome(ok: bool) -> Result<(), Stop> {
