@@ -116,7 +116,8 @@ enum BundleCommand {
 #[derive(Args, Clone)]
 struct SchemaArgs {
     /// The schema's name, for its own `<name>.<def>` references. Defaults to
-    /// the file name without `.schema`, `.yaml` or `.json`.
+    /// the file name without `.schema`, `.yaml` or `.json`. A published type
+    /// can always use its title instead.
     #[arg(long, global = true)]
     name: Option<String>,
     /// The base URL of a published type's $id, such as https://monorail.tech/schemas/.
