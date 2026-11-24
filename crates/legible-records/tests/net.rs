@@ -2,7 +2,7 @@
 //! publishers' key sets, against a local HTTP server on 127.0.0.1.
 //!
 //! The S3 test against a real server runs when `LEGIBLE_TEST_S3_ENDPOINT` is
-//! set (CI starts MinIO and always sets it).
+//! set (CI starts SeaweedFS and always sets it).
 #![cfg(feature = "net")]
 
 use std::collections::BTreeMap;
@@ -939,7 +939,7 @@ fn s3_needs_its_credentials() {
     assert!(source(&conn, &env_with(&[("T", "t")])).is_err());
 }
 
-/// Against a real S3 server (MinIO in CI): a feed uploaded under
+/// Against a real S3 server (SeaweedFS in CI): a feed uploaded under
 /// `feeds/track/` reads through either spelling of the prefix.
 #[test]
 fn s3_prefix_slash_normalized() {
@@ -954,14 +954,20 @@ fn s3_prefix_slash_normalized() {
     let key = std::env::var("LEGIBLE_TEST_S3_ACCESS_KEY").unwrap_or_else(|_| "test".to_owned());
     let secret =
         std::env::var("LEGIBLE_TEST_S3_SECRET_KEY").unwrap_or_else(|_| "testtesttest".to_owned());
-    let name = format!(
-        "legible-test-{}-{}",
+    let run_id = format!(
+        "run-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis()
     );
+    // The bucket LEGIBLE_TEST_S3_BUCKET names already exists (CI's
+    // SeaweedFS makes it); without one, the test makes its own.
+    let given = std::env::var("LEGIBLE_TEST_S3_BUCKET").ok();
+    let name = given
+        .clone()
+        .unwrap_or_else(|| format!("legible-test-{run_id}"));
     let bucket = rusty_s3::Bucket::new(
         url::Url::parse(&endpoint).unwrap(),
         rusty_s3::UrlStyle::Path,
@@ -972,18 +978,35 @@ fn s3_prefix_slash_normalized() {
     let creds = rusty_s3::Credentials::new(key.clone(), secret.clone());
     let agent: ureq::Agent = ureq::Agent::config_builder().proxy(None).build().into();
     use rusty_s3::S3Action;
-    let url = bucket.create_bucket(&creds).sign(Duration::from_secs(60));
-    agent.put(url.as_str()).send_empty().expect("create bucket");
+    if given.is_none() {
+        let url = bucket.create_bucket(&creds).sign(Duration::from_secs(60));
+        agent.put(url.as_str()).send_empty().expect("create bucket");
+    }
+    // Each run has its own prefix, so runs against one bucket don't meet.
+    let base = format!("{run_id}/feeds/track");
     let a = key_a();
     for (path, bytes) in build_feed(&[("notes", "2026-11-24T10:00:00Z")], Some(&a)) {
         let url = bucket
-            .put_object(Some(&creds), &format!("feeds/track/{path}"))
+            .put_object(Some(&creds), &format!("{base}/{path}"))
             .sign(Duration::from_secs(60));
         agent.put(url.as_str()).send(&bytes[..]).expect("upload");
     }
+    // A wrong secret is refused: the server really checks the signature.
+    let wrong = env_with(&[("S3_KEY", &key), ("S3_SECRET", "not-the-secret")]);
+    let conn = s3_connection(&endpoint, &name, &base);
+    let e = source(&conn, &wrong)
+        .unwrap()
+        .get("feed.json", None)
+        .unwrap_err();
+    eprintln!("s3: wrong secret: {e}");
+    assert!(e.contains("403"), "{e}");
     let env = env_with(&[("S3_KEY", &key), ("S3_SECRET", &secret)]);
-    for prefix in ["feeds/track", "feeds/track/"] {
-        let mut conn = s3_connection(&endpoint, &name, prefix);
+    // A missing object, to a key that may list the bucket, is a 404.
+    let missing = source(&conn, &env).unwrap().get("feed.json.age", None);
+    eprintln!("s3: missing object: {missing:?}");
+    assert_eq!(missing, Ok(Fetched::NotFound));
+    for prefix in [base.clone(), format!("{base}/")] {
+        let mut conn = s3_connection(&endpoint, &name, &prefix);
         conn.pins = vec![legible_records::keys::Pin {
             publisher: "acme.example".to_owned(),
             id: "a".to_owned(),
@@ -1011,5 +1034,9 @@ fn s3_prefix_slash_normalized() {
             report.etag.clone(),
         );
         assert_eq!(again.index, IndexOutcome::NotModified, "{prefix:?}");
+        eprintln!(
+            "s3: prefix {prefix:?}: index accepted, notes accepted, ETag {:?}, then not modified",
+            report.etag
+        );
     }
 }
