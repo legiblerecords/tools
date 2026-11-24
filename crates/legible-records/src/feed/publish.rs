@@ -30,9 +30,10 @@ pub fn next_published_at(now: Instant, previous: Option<&str>) -> String {
 }
 
 /// What a publisher keeps between publishes: when each bundle lost its last
-/// stream, so it is deleted only after a grace period; and each stream's
-/// last `published_at`, so a stream withdrawn and published again, or an
-/// index rebuilt, never goes back in time.
+/// stream, so it is deleted only after a grace period; each stream's last
+/// `published_at`, so a stream withdrawn and published again, or an index
+/// rebuilt, never goes back in time; and the last index's `updated_at`, so a
+/// rebuilt index isn't older than the one readers hold (`stale_feed`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PublishState {
     /// Bundle path to when it lost its last stream.
@@ -40,6 +41,9 @@ pub struct PublishState {
     /// Stream id to the last `published_at` published for it. A state file
     /// written before this was kept has none.
     pub published_at: BTreeMap<String, String>,
+    /// The `updated_at` of the last index published. A state file written
+    /// before this was kept has none.
+    pub updated_at: Option<String>,
 }
 
 impl PublishState {
@@ -79,20 +83,35 @@ impl PublishState {
                 published_at.insert(stream.clone(), at.to_owned());
             }
         }
+        let updated_at = match value.get("updated_at") {
+            None | Some(Value::Null) => None,
+            Some(at) => {
+                let at = at
+                    .as_str()
+                    .ok_or("not a publish state file: updated_at must be a string")?;
+                time::parse(at).map_err(|e| format!("updated_at: {e}"))?;
+                Some(at.to_owned())
+            }
+        };
         Ok(PublishState {
             unreferenced_since,
             published_at,
+            updated_at,
         })
     }
 
     /// The state file's bytes.
     pub fn to_bytes(&self) -> Vec<u8> {
-        canonical_record(&json!({
+        let mut value = json!({
             "$type": PUBLISH_STATE_TYPE,
             "version": 1,
             "unreferenced_since": self.unreferenced_since,
             "published_at": self.published_at,
-        }))
+        });
+        if let Some(at) = &self.updated_at {
+            value["updated_at"] = json!(at);
+        }
+        canonical_record(&value)
     }
 }
 
@@ -224,6 +243,8 @@ mod tests {
         state
             .published_at
             .insert("main".into(), "2026-11-24T10:00:00.000Z".into());
+        assert_eq!(PublishState::parse(&state.to_bytes()).unwrap(), state);
+        state.updated_at = Some("2026-11-24T10:00:00.001Z".into());
         assert_eq!(PublishState::parse(&state.to_bytes()).unwrap(), state);
         // A file from before published_at was kept still reads.
         let old = br#"{"$type":"legible-publish-state","version":1,"unreferenced_since":{}}"#;

@@ -35,9 +35,10 @@ pub enum FeedCommand {
     /// inputs into a signed (with -k) bundle, write bundles/<sha256>.zip, then feed.json and
     /// feed.sig. A feed is plain, or encrypted when -r is given, never both. With -k, the
     /// existing index is built on only if feed.sig is this key's signature over it (else
-    /// --rebuild). Never deploys: it writes only the directory given, which must be kept
+    /// --rebuild, or --previous-key after a rotation). Never deploys: it writes only the
+    /// directory given, which must be kept
     /// where whoever can write the feed's storage can't change it.
-    Publish(PublishArgs),
+    Publish(Box<PublishArgs>),
     /// Poll a feed from a connection file and report each stream's outcome, statelessly:
     /// nothing is written or delivered, and the history checks (stale_feed, replay) need a
     /// state, so they aren't made. Exit 0 when everything is accepted; 1 when anything is
@@ -124,9 +125,21 @@ pub struct PublishArgs {
     withdraw: bool,
     /// Start the index again from the stream on this command line only, dropping the
     /// others: for when the existing feed.sig is missing or isn't this key's signature
-    /// over the index, so the index can't be trusted.
+    /// over the index, so the index can't be trusted. The dropped streams' bundles are
+    /// noted for deletion (with --state), and the new index is dated after the old one.
     #[arg(long, conflicts_with = "withdraw")]
     rebuild: bool,
+    /// After a key rotation: the key file (from `keys new`) of the key that signed the
+    /// existing index. Only its public key is used, to check feed.sig, so the index is
+    /// built on and every stream kept. Don't use it for a key that was revoked: a thief of
+    /// the key may have changed the index, so --rebuild.
+    #[arg(
+        long,
+        value_name = "FILE",
+        requires = "key",
+        conflicts_with = "rebuild"
+    )]
+    previous_key: Option<PathBuf>,
     /// Record files (.json with $type and version) and attachments, or directories to
     /// publish every file in.
     #[arg(required_unless_present = "withdraw")]
@@ -142,11 +155,16 @@ fn fail<T>(message: String) -> Result<T, Stop> {
 struct Existing {
     feed: Option<Feed>,
     encrypted: bool,
+    /// When rebuilding, the index being dropped, if it can be read. It isn't
+    /// trusted: it only names bundles that may be deleted after the grace,
+    /// and dates the new index must follow (when they are no more than a
+    /// reader's 24 hours ahead).
+    dropped: Option<Feed>,
 }
 
 pub fn run(command: FeedCommand) -> Result<(), Stop> {
     match command {
-        FeedCommand::Publish(args) => publish(args),
+        FeedCommand::Publish(args) => publish(*args),
         FeedCommand::Check(args) => check(args),
         FeedCommand::Pull(args) => pull_feed(args),
     }
@@ -278,6 +296,14 @@ fn types_in(inputs: &[Input]) -> Vec<String> {
     found.into_iter().collect()
 }
 
+/// The latest of the instants given, as written.
+fn latest<const N: usize>(instants: [Option<String>; N]) -> Option<String> {
+    instants
+        .into_iter()
+        .flatten()
+        .reduce(|a, b| later_of(a, &b))
+}
+
 /// The later of the two instants, as written.
 fn later_of(a: String, b: &str) -> String {
     match (time::parse(&a), time::parse(b)) {
@@ -313,6 +339,18 @@ fn publish(args: PublishArgs) -> Result<(), Stop> {
         Some(path) => Some(crate::read_key(path)?),
         None => None,
     };
+    let previous_key: Option<SigningKey> = match &args.previous_key {
+        Some(path) => Some(crate::read_key(path)?),
+        None => None,
+    };
+    if let (Some(key), Some(previous)) = (&key, &previous_key) {
+        if previous.publisher != key.publisher {
+            return fail(format!(
+                "--previous-key: the key is {}'s, and -k is {}'s",
+                previous.publisher, key.publisher
+            ));
+        }
+    }
     let publisher = match (&key, &args.publisher) {
         (Some(key), Some(given)) if *given != key.publisher => {
             return fail(format!(
@@ -358,12 +396,18 @@ fn publish(args: PublishArgs) -> Result<(), Stop> {
         None => None,
         Some((path, bytes, encrypted)) => {
             let trusted = match &key {
-                Some(key) => index_signed_by(&args.dir, &bytes, key)?,
+                Some(key) => {
+                    index_signed_by(&args.dir, &bytes, key)?
+                        || match &previous_key {
+                            Some(previous) => index_signed_by(&args.dir, &bytes, previous)?,
+                            None => false,
+                        }
+                }
                 None => true,
             };
             if !trusted && !args.rebuild {
                 return fail(format!(
-                    "{}: feed.sig is missing or isn't this key's signature over {}, so the index may have been changed by whoever can write the directory; give --rebuild to start the index again from the streams on this command line only",
+                    "{}: feed.sig is missing or isn't this key's signature over {}, so the index may have been changed by whoever can write the directory; after a key rotation, give the old key with --previous-key; otherwise give --rebuild to start the index again from the streams on this command line only",
                     args.dir.display(),
                     path.display()
                 ));
@@ -373,15 +417,28 @@ fn publish(args: PublishArgs) -> Result<(), Stop> {
                     "--rebuild: the new index lists only {}; the streams in the existing index are dropped",
                     args.stream
                 );
+                // Read only to note what is dropped; an index that can't be
+                // read is no reason not to rebuild.
+                let dropped = match read_existing(&path, bytes, encrypted, args.identity.as_deref())
+                {
+                    Ok(feed) => Some(feed),
+                    Err(Stop::Failed(e)) => {
+                        eprintln!("--rebuild: the dropped index can't be read, so its bundles aren't noted for deletion: {e}");
+                        None
+                    }
+                    Err(Stop::Problems) => None,
+                };
                 Some(Existing {
                     feed: None,
                     encrypted,
+                    dropped,
                 })
             } else {
                 let feed = read_existing(&path, bytes, encrypted, args.identity.as_deref())?;
                 Some(Existing {
                     feed: Some(feed),
                     encrypted,
+                    dropped: None,
                 })
             }
         }
@@ -426,24 +483,40 @@ fn publish(args: PublishArgs) -> Result<(), Stop> {
     }
 
     let now = time::now();
-    let previous_index = existing_feed.map(|f| f.updated_at.as_str());
+    let dropped = existing.as_ref().and_then(|e| e.dropped.as_ref());
+    // A date from the dropped index isn't trusted: it counts only if a reader
+    // would take it, so a far-future one can't push the new index past what
+    // readers accept.
+    let plausible =
+        |at: &str| time::parse(at).is_ok_and(|at| !legible_records::keys::too_far_ahead(at, now));
+    let dropped_updated_at = dropped
+        .map(|f| f.updated_at.clone())
+        .filter(|at| plausible(at));
+    let dropped_published_at = dropped
+        .and_then(|f| f.streams.iter().find(|s| s.id == args.stream))
+        .map(|s| s.published_at.clone())
+        .filter(|at| plausible(at));
+    // The index's last updated_at: the existing index's, the dropped one's,
+    // or the publish state's, which outlives a rebuild.
+    let previous_index = latest([
+        existing_feed.map(|f| f.updated_at.clone()),
+        dropped_updated_at,
+        publish_state.as_ref().and_then(|s| s.updated_at.clone()),
+    ]);
     let previous_stream =
         existing_feed.and_then(|f| f.streams.iter().find(|s| s.id == args.stream));
     // The stream's last published_at: the index's, or the publish state's
     // high-water mark, which outlives a withdraw or a rebuild.
-    let high_water = publish_state
-        .as_ref()
-        .and_then(|state| state.published_at.get(&args.stream))
-        .map(String::as_str);
-    let previous_published_at = match (previous_stream.map(|s| s.published_at.clone()), high_water)
-    {
-        (Some(listed), Some(mark)) => Some(later_of(listed, mark)),
-        (Some(listed), None) => Some(listed),
-        (None, mark) => mark.map(str::to_owned),
-    };
+    let previous_published_at = latest([
+        previous_stream.map(|s| s.published_at.clone()),
+        dropped_published_at,
+        publish_state
+            .as_ref()
+            .and_then(|state| state.published_at.get(&args.stream).cloned()),
+    ]);
     let mut streams: Vec<StreamEntry> =
         existing_feed.map(|f| f.streams.clone()).unwrap_or_default();
-    let mut updated_at = next_published_at(now, previous_index);
+    let mut updated_at = next_published_at(now, previous_index.as_deref());
 
     // The new bundle, or the stream gone.
     let mut bundle_write: Option<(String, Vec<u8>)> = None;
@@ -573,11 +646,12 @@ fn publish(args: PublishArgs) -> Result<(), Stop> {
                 .published_at
                 .insert(args.stream.clone(), entry.published_at.clone());
         }
+        state.updated_at = Some(updated_at.clone());
         collect_garbage(
             &args.dir,
             path,
             &mut state,
-            existing_feed.map(|f| f.streams.as_slice()),
+            existing_feed.or(dropped).map(|f| f.streams.as_slice()),
             &feed,
             now,
             grace,

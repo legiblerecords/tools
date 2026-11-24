@@ -853,6 +853,110 @@ mod feed_publish {
     }
 
     #[test]
+    fn rebuild_dates_after_the_dropped_index_and_notes_its_bundles() {
+        let s = setup("t-rebuild-floor");
+        let state_file = s.temp.path("publish-state.json");
+        let signed = [arg("-k"), &s.key, arg("--state"), &state_file];
+        assert!(publish(&s, "one", &signed).status.success());
+        assert!(publish(&s, "two", &signed).status.success());
+        let index = s.feed_dir.join("feed.json");
+        let old = parse_feed(&std::fs::read(&index).unwrap()).unwrap();
+        let two = old
+            .streams
+            .iter()
+            .find(|e| e.id == "two")
+            .unwrap()
+            .bundle
+            .clone();
+
+        // The index is changed, so it must be rebuilt. It is dated an hour
+        // ahead, as readers may already hold it (another host's clock).
+        let ahead = time::format(time::now().plus_millis(3_600_000));
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&index).unwrap()).unwrap();
+        value["updated_at"] = serde_json::json!(ahead);
+        std::fs::write(&index, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        let mut rebuild = signed.to_vec();
+        rebuild.push(arg("--rebuild"));
+        let rebuilt = publish(&s, "one", &rebuild);
+        assert!(rebuilt.status.success(), "{rebuilt:?}");
+        let feed = parse_feed(&std::fs::read(&index).unwrap()).unwrap();
+        assert!(
+            time::parse(&feed.updated_at).unwrap() > time::parse(&ahead).unwrap(),
+            "{} after {ahead}",
+            feed.updated_at
+        );
+        // The dropped stream's bundle waits for the grace, then goes.
+        assert!(unreferenced(&state_file).contains(&two), "{rebuilt:?}");
+        // The state keeps the index's date, for a rebuild over an index that
+        // can't be read.
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&state_file).unwrap()).unwrap();
+        assert_eq!(value["updated_at"], serde_json::json!(feed.updated_at));
+        std::fs::write(&index, b"not json").unwrap();
+        assert!(publish(&s, "one", &rebuild).status.success());
+        let again = parse_feed(&std::fs::read(&index).unwrap()).unwrap();
+        assert!(time::parse(&again.updated_at).unwrap() > time::parse(&feed.updated_at).unwrap());
+
+        // A date further ahead than a reader accepts isn't followed.
+        let far = "2099-01-01T00:00:00Z";
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&index).unwrap()).unwrap();
+        value["updated_at"] = serde_json::json!(far);
+        std::fs::write(&index, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        assert!(publish(&s, "one", &rebuild).status.success());
+        let feed = parse_feed(&std::fs::read(&index).unwrap()).unwrap();
+        assert!(time::parse(&feed.updated_at).unwrap() < time::parse(far).unwrap());
+        let report = poll(&s, true, &mut ReaderState::default(), None);
+        assert_eq!(report.index, IndexOutcome::Accepted, "{report:?}");
+    }
+
+    #[test]
+    fn previous_key_keeps_every_stream_after_a_rotation() {
+        let s = setup("t-previous-key");
+        assert!(publish(&s, "one", &[arg("-k"), &s.key]).status.success());
+        assert!(publish(&s, "two", &[arg("-k"), &s.key]).status.success());
+        keys_new(&s.temp, "key-2027.json", "acme.example", "2027-03");
+        let new_key = s.temp.path("key-2027.json");
+
+        // The new key didn't sign the index: refused, pointing at the flag.
+        let refused = publish(&s, "one", &[arg("-k"), &new_key]);
+        assert_eq!(refused.status.code(), Some(2), "{refused:?}");
+        assert!(
+            text(&refused.stderr).contains("--previous-key"),
+            "{refused:?}"
+        );
+
+        // With the old key to check feed.sig, both streams are kept.
+        let rotated = publish(
+            &s,
+            "one",
+            &[arg("-k"), &new_key, arg("--previous-key"), &s.key],
+        );
+        assert!(rotated.status.success(), "{rotated:?}");
+        let feed = parse_feed(&std::fs::read(s.feed_dir.join("feed.json")).unwrap()).unwrap();
+        let ids: Vec<&str> = feed.streams.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, ["one", "two"]);
+        let sig = std::fs::read(s.feed_dir.join("feed.sig")).unwrap();
+        let file = legible_records::sign::SignatureFile::parse(&sig).unwrap();
+        assert_eq!(file.key, "2027-03");
+
+        // A key of another publisher isn't a previous key.
+        keys_new(&s.temp, "other.json", "other.example", "1");
+        let other = publish(
+            &s,
+            "one",
+            &[
+                arg("-k"),
+                &new_key,
+                arg("--previous-key"),
+                &s.temp.path("other.json"),
+            ],
+        );
+        assert_eq!(other.status.code(), Some(2), "{other:?}");
+    }
+
+    #[test]
     fn published_at_high_water_mark_outlives_a_withdraw() {
         let s = setup("t-hwm");
         let state_file = s.temp.path("publish-state.json");
