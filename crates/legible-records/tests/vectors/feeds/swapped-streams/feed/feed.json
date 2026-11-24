@@ -1,0 +1,40 @@
+{
+  "$type": "org.legiblerecords.feed",
+  "audience": "Monorail, for Track",
+  "id": "acme.example/track",
+  "publisher": "acme.example",
+  "streams": [
+    {
+      "bundle": "bundles/e9c550b54df5b75fac61d1b4b2e0d9f5d538c0de20178eb9cc24369f650a6256.zip",
+      "id": "policy-acknowledgments",
+      "published_at": "2026-11-24T11:00:00Z",
+      "record_types": [
+        "example.note"
+      ],
+      "sha256": "e9c550b54df5b75fac61d1b4b2e0d9f5d538c0de20178eb9cc24369f650a6256",
+      "title": "Invented stream policy-acknowledgments"
+    },
+    {
+      "bundle": "bundles/3a90552a2c4565817a2b4f7a9b9f5c5ee262defe2a65d205b6a708cbc8fbed37.zip",
+      "id": "access-reviews",
+      "published_at": "2026-11-24T11:00:00Z",
+      "record_types": [
+        "example.note"
+      ],
+      "sha256": "3a90552a2c4565817a2b4f7a9b9f5c5ee262defe2a65d205b6a708cbc8fbed37",
+      "title": "Invented stream access-reviews"
+    },
+    {
+      "bundle": "bundles/ff76ce16d62aa68247b53d9cc0cb4d1fe78eb146ef521945635abc6d64d75755.zip",
+      "id": "incidents",
+      "published_at": "2026-11-24T10:00:00Z",
+      "record_types": [
+        "example.note"
+      ],
+      "sha256": "ff76ce16d62aa68247b53d9cc0cb4d1fe78eb146ef521945635abc6d64d75755",
+      "title": "Invented stream incidents"
+    }
+  ],
+  "updated_at": "2026-11-24T11:00:00Z",
+  "version": 1
+}

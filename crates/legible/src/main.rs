@@ -1,11 +1,16 @@
 //! `legible`: the Legible Records command-line tool.
 
+mod feed_cmd;
+
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
-use legible_records::bundle::{self, Input, Limits};
+use legible_records::bundle::{self, Input, Limits, SignatureStatus};
+use legible_records::code::Code;
+use legible_records::keys::{parse_pin_text, KeySet, Trust};
 use legible_records::short_form::{self, Options};
+use legible_records::sign::{self, Context, SignatureFile, SigningKey};
 use legible_records::validate::Schemas;
 use legible_records::{compat, lint, COMMON_V1_ID};
 use serde_json::Value;
@@ -65,9 +70,86 @@ enum Command {
         #[command(flatten)]
         schema: SchemaArgs,
     },
-    /// Pack, unpack and verify bundles. To encrypt one, pipe it through age.
+    /// Pack, sign, verify and unpack bundles. To encrypt one, pipe it through age; verify and
+    /// unpack decrypt with -i.
     #[command(subcommand)]
     Bundle(BundleCommand),
+    /// Make signing keys, and endorse key sets with them.
+    #[command(subcommand)]
+    Keys(KeysCommand),
+    /// Feeds: publish a stream into a feed's directory, check a feed (stateless), or pull one,
+    /// keeping what the reader remembers.
+    #[command(subcommand)]
+    Feed(feed_cmd::FeedCommand),
+}
+
+#[derive(Subcommand)]
+enum KeysCommand {
+    /// Make a signing key. The secret key goes to a new file (mode 0600); the entry to add
+    /// to your keys.json is printed to stdout.
+    New {
+        /// Your domain, such as acme.example.
+        #[arg(long)]
+        publisher: String,
+        /// A name for the key, such as 2026-11.
+        #[arg(long)]
+        id: String,
+        /// Where to write the secret key. An existing file is refused.
+        #[arg(long, short = 'o')]
+        output: PathBuf,
+    },
+    /// Sign a key set (keys.json) with a key, writing keys.sig. The key must already be
+    /// in the key set readers hold: that is what makes the new set an endorsed one.
+    Sign {
+        /// The key set (.json), signed exactly as stored.
+        keys: PathBuf,
+        /// The secret key file from `keys new`.
+        #[arg(long, short = 'k')]
+        key: PathBuf,
+        /// Where to write keys.sig, or - for stdout.
+        #[arg(long, short = 'o')]
+        output: PathBuf,
+    },
+}
+
+#[derive(Args, Clone)]
+struct TrustArgs {
+    /// A key to trust, as <publisher>/<id>=<public_key> (base64url); repeat for several.
+    #[arg(long = "pin", value_name = "PUBLISHER/ID=PUBLIC_KEY")]
+    pins: Vec<String>,
+    /// A publisher's key set (keys.json) to trust; repeat for several. A file only:
+    /// nothing is fetched.
+    #[arg(long = "key-set", value_name = "FILE")]
+    key_sets: Vec<PathBuf>,
+}
+
+impl TrustArgs {
+    /// The keys given, or a message for a pin or key set that can't be used.
+    fn trust(&self) -> Result<Trust, Stop> {
+        let mut trust = Trust::default();
+        for text in &self.pins {
+            let pin =
+                parse_pin_text(text).map_err(|e| Stop::Failed(format!("--pin {text}: {e}")))?;
+            trust.pins.push(pin);
+        }
+        for path in &self.key_sets {
+            let bytes = read_input(path)?;
+            let set = KeySet::parse(&bytes)
+                .map_err(|code| Stop::Failed(format!("{}: {}", path.display(), code.as_str())))?;
+            let publisher = set.publisher.clone();
+            if trust.key_sets.insert(publisher.clone(), set).is_some() {
+                return Err(Stop::Failed(format!(
+                    "{}: a second key set for {publisher}",
+                    path.display()
+                )));
+            }
+        }
+        Ok(trust)
+    }
+
+    fn given(&self) -> bool {
+        !self.pins.is_empty() || !self.key_sets.is_empty()
+    }
 }
 
 #[derive(Subcommand)]
@@ -89,25 +171,50 @@ enum BundleCommand {
     },
     /// Verify a bundle and write its files into a new or empty directory.
     Unpack {
-        /// The bundle (.zip), or - for stdin.
+        /// The bundle (.zip or encrypted .zip.age), or - for stdin.
         bundle: PathBuf,
         /// The directory to write into.
         #[arg(long, short = 'd')]
         directory: PathBuf,
+        /// An age identity file, to decrypt a bundle that is encrypted.
+        #[arg(long, short = 'i')]
+        identity: Option<PathBuf>,
         /// Schemas for checking record references; see verify.
         #[arg(long = "schema", short = 's')]
         schemas: Vec<PathBuf>,
         #[command(flatten)]
+        trust: TrustArgs,
+        #[command(flatten)]
         schema: SchemaArgs,
     },
-    /// Check a bundle's hashes, file list and references.
-    Verify {
-        /// The bundle (.zip), or - for stdin.
+    /// Sign a bundle's manifest as stored, writing a copy with manifest.sig.
+    Sign {
+        /// The bundle (.zip), or - for stdin. One that is already signed is refused.
         bundle: PathBuf,
+        /// The secret key file from `keys new`.
+        #[arg(long, short = 'k')]
+        key: PathBuf,
+        /// Where to write the signed bundle (.zip), or - for stdout.
+        #[arg(long, short = 'o')]
+        output: PathBuf,
+    },
+    /// Check a bundle's hashes, file list, references and signature.
+    ///
+    /// Exit 0 doesn't mean a signature was checked: it did only when the signature line
+    /// says `verified`, which needs --pin or --key-set. Without them, a signed bundle is
+    /// reported `unverified`, and a bad bundle is still exit 1.
+    Verify {
+        /// The bundle (.zip or encrypted .zip.age), or - for stdin.
+        bundle: PathBuf,
+        /// An age identity file, to decrypt a bundle that is encrypted.
+        #[arg(long, short = 'i')]
+        identity: Option<PathBuf>,
         /// A schema (.yaml or .json) whose records' references to check; repeat for several.
         /// Attachment references are always checked.
         #[arg(long = "schema", short = 's')]
         schemas: Vec<PathBuf>,
+        #[command(flatten)]
+        trust: TrustArgs,
         #[command(flatten)]
         schema: SchemaArgs,
     },
@@ -184,6 +291,7 @@ fn main() -> ExitCode {
 
 fn run(command: Command) -> Result<(), Stop> {
     match command {
+        Command::Feed(command) => feed_cmd::run(command),
         Command::Expand { file, schema } => {
             let body = load_schema(&file, &schema)?;
             println!("{}", pretty(&body));
@@ -267,6 +375,7 @@ fn run(command: Command) -> Result<(), Stop> {
             outcome(ok)
         }
         Command::Bundle(command) => run_bundle(command),
+        Command::Keys(command) => run_keys(command),
     }
 }
 
@@ -280,8 +389,15 @@ fn run_bundle(command: BundleCommand) -> Result<(), Stop> {
         } => {
             let bodies = load_schemas(&schemas, &schema)?;
             let mut files = Vec::new();
+            let mut skipped = Vec::new();
             for path in &inputs {
-                collect(path, &mut files)?;
+                collect(path, true, &mut files, &mut skipped)?;
+            }
+            if !skipped.is_empty() {
+                eprintln!(
+                    "skipped {}: packing writes a new manifest, so the result is a new, unsigned bundle, not the one these came from",
+                    skipped.join(", ")
+                );
             }
             let produced_by = serde_json::json!({
                 "app": "legible",
@@ -300,20 +416,40 @@ fn run_bundle(command: BundleCommand) -> Result<(), Stop> {
         }
         BundleCommand::Verify {
             bundle: path,
+            identity,
             schemas,
+            trust,
             schema,
         } => {
-            let opened = open_bundle(&path)?;
-            verify_bundle(&path, &opened, &schemas, &schema)
+            let opened = open_bundle(&path, identity.as_deref())?;
+            verify_bundle(&path, &opened, &schemas, &trust, &schema)
+        }
+        BundleCommand::Sign {
+            bundle: path,
+            key,
+            output,
+        } => {
+            let key = read_key(&key)?;
+            let zip = read_input(&path)?;
+            let signed =
+                bundle::add_signature(&zip, &key, Limits::default()).map_err(|problems| {
+                    problems
+                        .iter()
+                        .for_each(|p| println!("{}: {p}", path.display()));
+                    Stop::Problems
+                })?;
+            write_output(&output, &signed)
         }
         BundleCommand::Unpack {
             bundle: path,
             directory,
+            identity,
             schemas,
+            trust,
             schema,
         } => {
-            let opened = open_bundle(&path)?;
-            verify_bundle(&path, &opened, &schemas, &schema)?;
+            let opened = open_bundle(&path, identity.as_deref())?;
+            verify_bundle(&path, &opened, &schemas, &trust, &schema)?;
             let empty = match std::fs::read_dir(&directory) {
                 Ok(mut entries) => entries.next().is_none(),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
@@ -325,9 +461,14 @@ fn run_bundle(command: BundleCommand) -> Result<(), Stop> {
                     directory.display()
                 )));
             }
-            let manifest =
-                serde_json::to_vec_pretty(&opened.manifest).expect("JSON values serialize");
-            let files = std::iter::once((bundle::MANIFEST, &manifest))
+            // The manifest and signature as stored: a signature covers these exact bytes.
+            let files = std::iter::once((bundle::MANIFEST, &opened.manifest_bytes))
+                .chain(
+                    opened
+                        .signature
+                        .as_ref()
+                        .map(|bytes| (bundle::SIGNATURE, bytes)),
+                )
                 .chain(opened.files.iter().map(|(p, b)| (p.as_str(), b)));
             for (relative, bytes) in files {
                 let target = directory.join(relative);
@@ -349,8 +490,15 @@ fn run_bundle(command: BundleCommand) -> Result<(), Stop> {
 }
 
 /// Reads a file, or every regular file under a directory, as bundle inputs.
-/// Symbolic links are skipped.
-fn collect(path: &Path, out: &mut Vec<Input>) -> Result<(), Stop> {
+/// Symbolic links are skipped. A `manifest.json` or `manifest.sig` among the
+/// inputs themselves or directly in a directory given as one (an unpacked
+/// bundle's own) isn't packed: its path is added to `skipped`.
+fn collect(
+    path: &Path,
+    top: bool,
+    out: &mut Vec<Input>,
+    skipped: &mut Vec<String>,
+) -> Result<(), Stop> {
     let failed = |e: std::io::Error| Stop::Failed(format!("{}: {e}", path.display()));
     let kind = std::fs::symlink_metadata(path).map_err(failed)?.file_type();
     if kind.is_dir() {
@@ -361,13 +509,18 @@ fn collect(path: &Path, out: &mut Vec<Input>) -> Result<(), Stop> {
             .map_err(failed)?;
         entries.sort();
         for entry in entries {
-            collect(&entry, out)?;
+            // Only the directory's own files can be a bundle's manifest or signature.
+            collect(&entry, top && !entry.is_dir(), out, skipped)?;
         }
     } else if kind.is_file() {
         let name = path
             .file_name()
             .and_then(|n| n.to_str())
             .ok_or_else(|| Stop::Failed(format!("{}: not a UTF-8 file name", path.display())))?;
+        if top && (name == bundle::MANIFEST || name == bundle::SIGNATURE) {
+            skipped.push(path.display().to_string());
+            return Ok(());
+        }
         out.push(Input {
             name: name.to_owned(),
             bytes: std::fs::read(path).map_err(failed)?,
@@ -394,13 +547,30 @@ fn write_output(path: &Path, bytes: &[u8]) -> Result<(), Stop> {
     std::fs::write(path, bytes).map_err(|e| Stop::Failed(format!("{}: {e}", path.display())))
 }
 
-fn open_bundle(path: &Path) -> Result<bundle::Opened, Stop> {
-    let bytes = read_input(path)?;
-    if bytes.starts_with(b"age-encryption.org/") || bytes.starts_with(b"-----BEGIN AGE") {
-        return Err(Stop::Failed(format!(
-            "{}: encrypted with age; decrypt it first (age -d)",
-            path.display()
-        )));
+fn open_bundle(path: &Path, identity: Option<&Path>) -> Result<bundle::Opened, Stop> {
+    let stdin = Path::new("-");
+    if path == stdin && identity == Some(stdin) {
+        return Err(Stop::Failed(
+            "-i -: the bundle is already read from stdin; give the identity as a file".to_owned(),
+        ));
+    }
+    let mut bytes = read_input(path)?;
+    if legible_records::age::is_encrypted(&bytes) {
+        let Some(identity) = identity else {
+            return Err(Stop::Failed(format!(
+                "{}: encrypted with age; give the identity file with -i",
+                path.display()
+            )));
+        };
+        let text = zeroize::Zeroizing::new(
+            String::from_utf8(read_input(identity)?)
+                .map_err(|_| Stop::Failed(format!("{}: not text", identity.display())))?,
+        );
+        bytes = legible_records::age::decrypt(&bytes, &text, Limits::default().max_stored_bytes())
+            .map_err(|e| {
+                println!("{}: couldn't decrypt: {e}", path.display());
+                Stop::Problems
+            })?;
     }
     bundle::open(&bytes, Limits::default()).map_err(|problems| {
         for problem in &problems {
@@ -418,10 +588,12 @@ fn verify_bundle(
     path: &Path,
     opened: &bundle::Opened,
     schemas: &[PathBuf],
+    trust_args: &TrustArgs,
     args: &SchemaArgs,
 ) -> Result<(), Stop> {
     let bodies = load_schemas(schemas, args)?;
-    let report = bundle::verify(opened, &bodies);
+    let trust = trust_args.trust()?;
+    let report = bundle::verify_at(opened, &bodies, legible_records::time::now());
     for problem in &report.problems {
         println!("{}: {problem}", path.display());
     }
@@ -431,7 +603,121 @@ fn verify_bundle(
             path.display()
         );
     }
-    outcome(report.problems.is_empty())
+    let status = signature_status(opened, &trust, trust_args.given());
+    println!("{}", signature_line(opened, &status));
+    outcome(report.problems.is_empty() && status.is_ok())
+}
+
+/// A bundle's signature against what the reader trusts. A signed bundle with
+/// no trusted keys given isn't checked: it is `Unverified`, which is not a
+/// failure. Any `Code` is a problem with the bundle.
+fn signature_status(
+    opened: &bundle::Opened,
+    trust: &Trust,
+    trust_given: bool,
+) -> Result<SignatureStatus, Code> {
+    if !trust_given {
+        if let Some(bytes) = &opened.signature {
+            SignatureFile::parse(bytes)?;
+            return Ok(SignatureStatus::Unverified);
+        }
+    }
+    bundle::check_signature(opened, trust, None)
+}
+
+/// The line `bundle verify` prints about the signature, for every outcome.
+fn signature_line(opened: &bundle::Opened, status: &Result<SignatureStatus, Code>) -> String {
+    match status {
+        Ok(SignatureStatus::Verified { publisher, key, .. }) => {
+            format!("signature: verified ({publisher} {key})")
+        }
+        Ok(SignatureStatus::Unverified) => {
+            match opened
+                .signature
+                .as_deref()
+                .and_then(|bytes| SignatureFile::parse(bytes).ok())
+            {
+                Some(sig) => format!(
+                    "signature: unverified (signed by {} {}; no trusted keys given)",
+                    sig.publisher, sig.key
+                ),
+                None => "signature: unverified".to_owned(),
+            }
+        }
+        Err(code) => format!("signature: {}", code.as_str()),
+    }
+}
+
+fn read_key(path: &Path) -> Result<SigningKey, Stop> {
+    let bytes = zeroize::Zeroizing::new(read_input(path)?);
+    SigningKey::from_json(&bytes).map_err(|e| Stop::Failed(format!("{}: {e}", path.display())))
+}
+
+fn run_keys(command: KeysCommand) -> Result<(), Stop> {
+    match command {
+        KeysCommand::New {
+            publisher,
+            id,
+            output,
+        } => {
+            if output == Path::new("-") {
+                return Err(Stop::Failed(
+                    "-o -: the secret key goes to a file, not stdout".to_owned(),
+                ));
+            }
+            let key = SigningKey::generate(&publisher, &id).map_err(Stop::Failed)?;
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            // Created private: never written and then restricted.
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+            let mut file = options
+                .open(&output)
+                .map_err(|e| Stop::Failed(format!("{}: {e}", output.display())))?;
+            if let Err(e) = std::io::Write::write_all(&mut file, &key.to_json()) {
+                drop(file);
+                let _ = std::fs::remove_file(&output);
+                return Err(Stop::Failed(format!("{}: {e}", output.display())));
+            }
+            let entry = serde_json::json!({
+                "id": key.id,
+                "alg": "ed25519",
+                "public_key": sign::b64url(&key.public().key),
+                "created_at": legible_records::time::format(legible_records::time::now()),
+            });
+            println!("{}", pretty(&entry));
+            Ok(())
+        }
+        KeysCommand::Sign { keys, key, output } => {
+            let key = read_key(&key)?;
+            let bytes = read_input(&keys)?;
+            let set = KeySet::parse(&bytes)
+                .map_err(|code| Stop::Failed(format!("{}: {}", keys.display(), code.as_str())))?;
+            if set.publisher != key.publisher {
+                return Err(Stop::Failed(format!(
+                    "{}: the key set is for {}, but the key is {}'s",
+                    keys.display(),
+                    set.publisher,
+                    key.publisher
+                )));
+            }
+            let public = key.public().key;
+            if !set
+                .keys
+                .iter()
+                .any(|k| k.id == key.id && k.public_key == public)
+            {
+                eprintln!(
+                    "warning: {}: {}/{} isn't in this key set; readers only take an endorsement from a key they already hold",
+                    keys.display(),
+                    key.publisher,
+                    key.id
+                );
+            }
+            let signature = sign::sign(&key, Context::Keys, &bytes);
+            write_output(&output, &signature.to_bytes())
+        }
+    }
 }
 
 fn outcome(ok: bool) -> Result<(), Stop> {

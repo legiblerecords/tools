@@ -13,6 +13,10 @@ default = ["validate"]
 # Validating records against JSON Schema. Off for the WebAssembly build,
 # where JavaScript validators do this job.
 validate = ["dep:jsonschema"]
+# Encrypted bundles and feeds (age). Off for the WebAssembly build.
+age = ["dep:age"]
+# Reading feeds over HTTPS and S3 (`net`). Off for the WebAssembly build.
+net = ["dep:ureq", "dep:rusty-s3", "dep:url"]
 
 [dependencies]
 serde_json.workspace = true
@@ -21,3 +25,22 @@ zip.workspace = true
 flate2.workspace = true
 sha2.workspace = true
 jsonschema = { workspace = true, optional = true }
+age = { version = "0.11", features = ["armor"], optional = true }
+ed25519-dalek.workspace = true
+time.workspace = true
+getrandom.workspace = true
+zeroize.workspace = true
+# Rustls, with the platform's certificate verifier so that a reader trusts
+# what its machine trusts (a corporate proxy's CA included).
+ureq = { version = "3.5", default-features = false, features = ["rustls", "platform-verifier"], optional = true }
+# Presigned S3 requests only: no XML parsing.
+rusty-s3 = { version = "0.12", default-features = false, features = ["rustcrypto"], optional = true }
+url = { version = "2", optional = true }
+
+[dev-dependencies]
+tiny_http = "0.12"
+
+# getrandom has no source on wasm32-unknown-unknown without `js`, so the core crate
+# builds there on its own.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }

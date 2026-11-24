@@ -10,7 +10,7 @@ Status: early, not yet published.
 npx @legiblerecords/legible@0.1.0 --help
 ```
 
-It has the Rust tool's commands (`expand`, `generate`, `lint`, `check-compat`, `validate`, and `bundle pack`, `verify` and `unpack`), and encrypts bundles for sending over email and other transports you don't trust:
+It has the Rust tool's commands (`expand`, `generate`, `lint`, `check-compat`, `validate`, and `bundle pack`, `verify`, `unpack` and `sign`, and `keys new`), and encrypts bundles for sending over email and other transports you don't trust:
 
 ```sh
 # A new passphrase, printed to stderr: send it by a different channel than the bundle.
@@ -25,7 +25,23 @@ legible bundle unpack evidence.zip.age -d evidence
 legible bundle verify evidence.zip.age -i key.txt -s control.yaml --base https://monorail.tech/schemas/
 ```
 
-`unpack` verifies first and writes nothing from a bundle that fails, only into a new or empty directory. Encrypting to SSH keys needs the [age](https://age-encryption.org) command: `legible bundle pack evidence/ -o - | age -R ~/.ssh/id_ed25519.pub`.
+`unpack` verifies first and writes nothing from a bundle that fails, only into a new or empty directory; it writes `manifest.json` and `manifest.sig` exactly as stored, so the signature still covers them. The bundle and `-i` can't both be `-` (stdin). Encrypting to SSH keys needs the [age](https://age-encryption.org) command: `legible bundle pack evidence/ -o - | age -R ~/.ssh/id_ed25519.pub`.
+
+## Signing
+
+A publisher signs a bundle's manifest with an ed25519 key, and readers check the signature against keys they trust. The output and exit codes match the Rust tool's.
+
+```sh
+# The secret key goes to a new file (mode 0600, an existing file is refused); the entry to add to your keys.json is printed.
+legible keys new --publisher acme.example --id 2026-11 -o key.json
+legible bundle sign evidence.zip -k key.json -o evidence.signed.zip
+
+# Trust a key (repeat for several), or a publisher's keys.json.
+legible bundle verify evidence.signed.zip --pin acme.example/2026-11=<public_key>
+legible bundle unpack evidence.signed.zip -d evidence --key-set keys.json
+```
+
+`bundle verify` prints `signature: verified (<publisher> <key>)`, `signature: unverified` for an unsigned bundle, or `signature: unverified (signed by <publisher> <key>; no trusted keys given)` when a signed bundle is checked with no `--pin` or `--key-set`. A signature that fails prints its code (`unknown_key`, `bad_signature`, `revoked_key`, ...) and exits 1. A malformed `--pin` or a key set that doesn't parse exits 2, naming that file. A pin and a key set that disagree about a key id make it untrusted (`unknown_key`), and so does a pin whose public key a key set lists under another id (one key has one name: fix the pin). Exit 0 means a signature was checked only when the line says `verified`.
 
 ## Node
 
@@ -63,7 +79,13 @@ const result = expand(text, "risk-appetite", { base: "https://monorail.tech/sche
 | `parseYaml(text)` | `{ ok: true, value }` or `{ ok: false, error: { reason, line, col, message } }` |
 | `commonSchema()` | `org.legiblerecords.common` version 1 |
 | `new BundleBuilder()` | `.add(name, bytes)` each file, then `.finish(schemas?, producedBy?)`, which returns a `PackedBundle` with `.zip()`, `.manifest()` and `.attachments()`, or throws with every problem, one per line |
-| `Bundle.open(bytes)` | a `Bundle`, with `.manifest()`, `.paths()`, `.file(path)` and `.verify(schemas?)` → `{ problems, uncheckedTypes }`; throws for an unsafe or oversized zip |
+| `Bundle.open(bytes)` | a `Bundle`, with `.manifest()`, `.manifestBytes()` and `.signature()` (as stored; `undefined` when unsigned), `.paths()`, `.file(path)` and `.verify(schemas?, nowMillis?)` → `{ problems, uncheckedTypes }` (a `published_at` more than 24 hours after `nowMillis`, default `Date.now()`, is a problem); throws for an unsafe, repeated or oversized zip entry |
+| `bundle.verifySignature({ pins?, keySets?, expectedPublisher? })` | `{ status: "verified", publisher, key }` or `{ status: "unverified" }`. `pins` are `[{ publisher, id, alg?, publicKey }]` (canonical base64url), `keySets` are `Uint8Array`s of a publisher's keys.json as stored. Throws an `Error` whose `message` is the outcome code, such as `unknown_key` or `bad_signature` |
+| `parsePin(text)` | `{ publisher, id, alg, publicKey }` from `<publisher>/<id>=<public_key>`, as `--pin` takes it; throws with what is wrong |
+| `checkKeySet(bytes)` | the publisher of a key set (keys.json as stored); throws `bad_key_set` |
+| `bundle.signedBy()` | `{ publisher, key }` the manifest claims, unchecked, or `undefined` if unsigned |
+| `generateKey(publisher, id)` | `{ secretKey: Uint8Array, keySetEntry }`: the secret key file's bytes, which you keep private, and the entry for your keys.json |
+| `signBundle(zip, secretKey)` | the bundle's bytes with `manifest.sig` added; throws if it has problems or is already signed |
 
 The bundle classes hold WebAssembly memory: call `.free()` when you're done with one.
 

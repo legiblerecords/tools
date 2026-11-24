@@ -7,7 +7,7 @@
 // the input has problems, 2 when the tool couldn't run.
 
 import { createRequire } from "node:module";
-import { readFileSync, writeFileSync, readdirSync, lstatSync, mkdirSync, openSync, writeSync, closeSync } from "node:fs";
+import { readFileSync, writeFileSync, readdirSync, lstatSync, mkdirSync, openSync, writeSync, closeSync, unlinkSync } from "node:fs";
 import { basename, dirname, join, resolve, relative, sep, isAbsolute } from "node:path";
 import { parseArgs } from "node:util";
 import { randomInt } from "node:crypto";
@@ -30,8 +30,14 @@ Usage:
   legible check-compat <old> <new> [schema options]
   legible validate -s <schema>... <record.json>... [schema options]
   legible bundle pack <file|dir>... -o <bundle> [-s <schema>]... [encryption]
-  legible bundle unpack <bundle> -d <dir> [-s <schema>]... [-i <identity>]
-  legible bundle verify <bundle> [-s <schema>]... [-i <identity>]
+  legible bundle unpack <bundle> -d <dir> [-s <schema>]... [-i <identity>] [trust]
+  legible bundle verify <bundle> [-s <schema>]... [-i <identity>] [trust]
+  legible bundle sign <bundle> -k <key> -o <signed-bundle>
+  legible keys new --publisher <domain> --id <key-id> -o <key-file>
+
+Trust (bundle verify, unpack): without it a signed bundle is reported unverified.
+  --pin <publisher>/<id>=<public_key>  trust a key (base64url); repeat for several
+  --key-set <file>    trust a publisher's keys.json; repeat for several
 
 Schema options:
   --name <name>       the schema's name, for its own <name>.<def> references
@@ -109,6 +115,8 @@ async function main(argv) {
     }
     case "bundle":
       return bundle(rest);
+    case "keys":
+      return keys(rest);
     default:
       throw new Failed(`unknown command ${command}; see legible --help`);
   }
@@ -117,6 +125,7 @@ async function main(argv) {
 async function bundle([action, ...rest]) {
   const schema = { type: "string", short: "s", multiple: true };
   const identity = { type: "string", short: "i", multiple: true };
+  const trust = { pin: { type: "string", multiple: true }, "key-set": { type: "string", multiple: true } };
   switch (action) {
     case "pack": {
       const { positionals, values } = parse(
@@ -164,7 +173,7 @@ async function bundle([action, ...rest]) {
       return;
     }
     case "verify": {
-      const { positionals: [file], values } = parse(rest, { ...schemaOptions, schema, identity }, 1);
+      const { positionals: [file], values } = parse(rest, { ...schemaOptions, schema, identity, ...trust }, 1);
       const opened = await openBundle(file, values);
       try {
         verify(file, opened, values);
@@ -174,7 +183,7 @@ async function bundle([action, ...rest]) {
       return;
     }
     case "unpack": {
-      const { positionals: [file], values } = parse(rest, { ...schemaOptions, schema, identity, directory: { type: "string", short: "d" } }, 1);
+      const { positionals: [file], values } = parse(rest, { ...schemaOptions, schema, identity, ...trust, directory: { type: "string", short: "d" } }, 1);
       if (!values.directory) throw new Failed("bundle unpack needs -d <directory>");
       const opened = await openBundle(file, values);
       try {
@@ -185,9 +194,71 @@ async function bundle([action, ...rest]) {
       }
       return;
     }
+    case "sign": {
+      const { positionals: [file], values } = parse(rest, { key: { type: "string", short: "k" }, output: { type: "string", short: "o" } }, 1);
+      if (!values.key) throw new Failed("bundle sign needs -k <key>");
+      if (!values.output) throw new Failed("bundle sign needs -o <signed-bundle>, or -o - for stdout");
+      const secret = readInput(values.key);
+      try {
+        const zip = readInput(file);
+        let signed;
+        try {
+          signed = legible.signBundle(zip, secret);
+        } catch (e) {
+          // A bad key file is the tool failing; the bundle's problems are the input's.
+          if (/secret key file/.test(message(e))) throw new Failed(`${values.key}: ${message(e)}`);
+          for (const line of message(e).split("\n")) console.log(`${file}: ${line}`);
+          throw new Problems();
+        }
+        writeOutput(values.output, signed);
+      } finally {
+        secret.fill(0);
+      }
+      return;
+    }
     default:
-      throw new Failed(`unknown bundle command ${action ?? ""}; use pack, unpack or verify`);
+      throw new Failed(`unknown bundle command ${action ?? ""}; use pack, unpack, verify or sign`);
   }
+}
+
+async function keys([action, ...rest]) {
+  if (action !== "new") throw new Failed(`unknown keys command ${action ?? ""}; use new`);
+  const { values } = parse(rest, { publisher: { type: "string" }, id: { type: "string" }, output: { type: "string", short: "o" } }, 0);
+  if (!values.publisher) throw new Failed("keys new needs --publisher <domain>");
+  if (!values.id) throw new Failed("keys new needs --id <key-id>");
+  if (!values.output) throw new Failed("keys new needs -o <key-file>");
+  if (values.output === "-") throw new Failed("-o -: the secret key goes to a file, not stdout");
+  let generated;
+  try {
+    generated = legible.generateKey(values.publisher, values.id);
+  } catch (e) {
+    throw new Failed(message(e));
+  }
+  const { secretKey, keySetEntry } = generated;
+  try {
+    let fd;
+    try {
+      // Created private: never written and then restricted. An existing file is refused.
+      fd = openSync(values.output, "wx", 0o600);
+    } catch (e) {
+      throw new Failed(`${values.output}: ${message(e)}`);
+    }
+    try {
+      writeSync(fd, secretKey);
+    } catch (e) {
+      closeSync(fd);
+      fd = undefined;
+      try {
+        unlinkSync(values.output);
+      } catch {}
+      throw new Failed(`${values.output}: ${message(e)}`);
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+  } finally {
+    secretKey.fill(0);
+  }
+  console.log(JSON.stringify(keySetEntry, null, 2));
 }
 
 // ---- Arguments and files ----
@@ -428,6 +499,9 @@ function prompt(question) {
 }
 
 async function openBundle(file, values) {
+  if (file === "-" && (values.identity ?? []).includes("-")) {
+    throw new Failed("-i -: the bundle is already read from stdin; give the identity as a file");
+  }
   let bytes = readInput(file);
   if (startsWith(bytes, AGE_BINARY) || startsWith(bytes, AGE_ARMOR)) bytes = await decrypt(bytes, values, file);
   try {
@@ -438,12 +512,83 @@ async function openBundle(file, values) {
   }
 }
 
+/** `<publisher>/<id>=<public_key>`: a quick look here, for a clear message, then the
+ * library's own check (the one the Rust tool uses), which has the final word. */
+function parsePin(text) {
+  const shape = "expected <publisher>/<id>=<public_key>, such as acme.example/2026-11=<base64url>";
+  const eq = text.indexOf("=");
+  const slash = eq < 0 ? -1 : text.slice(0, eq).indexOf("/");
+  if (eq < 0 || slash < 0) throw new Failed(`--pin ${text}: ${shape}`);
+  const publisher = text.slice(0, slash);
+  const id = text.slice(slash + 1, eq);
+  const publicKey = text.slice(eq + 1);
+  if (publisher.length > 253 || !/^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+([0-9]*[a-z]([a-z0-9-]*[a-z0-9])?|[0-9]+-[a-z0-9-]*[a-z0-9])$/.test(publisher)) {
+    throw new Failed(`--pin ${text}: ${JSON.stringify(publisher)} is not a publisher: ${shape}`);
+  }
+  if (!/^[a-z0-9][a-z0-9.-]{0,63}$/.test(id)) {
+    throw new Failed(`--pin ${text}: ${JSON.stringify(id)} is not a key id: ${shape}`);
+  }
+  if (!/^[A-Za-z0-9_-]{43}$/.test(publicKey)) {
+    throw new Failed(`--pin ${text}: the public key isn't 32 bytes of base64url without padding`);
+  }
+  try {
+    return legible.parsePin(text);
+  } catch (e) {
+    throw new Failed(`--pin ${text}: ${message(e)}`);
+  }
+}
+
+/** Each --key-set file, read and checked on its own, so an error names its path. */
+function keySetsFrom(paths) {
+  const seen = new Map();
+  return paths.map((path) => {
+    const bytes = new Uint8Array(readInput(path));
+    let publisher;
+    try {
+      publisher = legible.checkKeySet(bytes);
+    } catch (e) {
+      throw new Failed(`${path}: ${message(e)}`);
+    }
+    if (seen.has(publisher)) throw new Failed(`${path}: a second key set for ${publisher} (the first is ${seen.get(publisher)})`);
+    seen.set(publisher, path);
+    return bytes;
+  });
+}
+
+/** The keys given with --pin and --key-set, as verifySignature takes them. */
+function trustFrom(values) {
+  const pins = (values.pin ?? []).map(parsePin);
+  const keySets = keySetsFrom(values["key-set"] ?? []);
+  return { pins, keySets, given: pins.length + keySets.length > 0 };
+}
+
+/** The signature line `bundle verify` prints, and whether it is a problem. */
+function signatureLine(opened, trust) {
+  try {
+    if (!trust.given) {
+      const by = opened.signedBy();
+      return by
+        ? [`signature: unverified (signed by ${by.publisher} ${by.key}; no trusted keys given)`, false]
+        : ["signature: unverified", false];
+    }
+    const result = opened.verifySignature({ pins: trust.pins, keySets: trust.keySets });
+    return result.status === "verified"
+      ? [`signature: verified (${result.publisher} ${result.key})`, false]
+      : ["signature: unverified", false];
+  } catch (e) {
+    return [`signature: ${message(e)}`, true];
+  }
+}
+
 function verify(file, opened, values) {
   const schemas = (values.schema ?? []).map((s) => loadSchema(s, values));
+  const trust = trustFrom(values);
   const report = opened.verify(schemas);
   for (const problem of report.problems) console.log(`${file}: ${problem}`);
   for (const kind of report.uncheckedTypes) console.error(`${file}: no schema given for ${kind}; its references weren't checked`);
-  if (report.problems.length) throw new Problems();
+  const [line, bad] = signatureLine(opened, trust);
+  console.log(line);
+  if (report.problems.length || bad) throw new Problems();
 }
 
 /** Writes a verified bundle into a new or empty directory, never over a file. */
@@ -456,7 +601,10 @@ function unpack(opened, directory) {
   }
   if (entries.length) throw new Failed(`${directory}: not empty; unpack into a new or empty directory`);
   const root = resolve(directory);
-  const files = [["manifest.json", Buffer.from(JSON.stringify(sortKeys(opened.manifest()), null, 2) + "\n")]];
+  // The manifest and signature exactly as stored: a signature covers these bytes.
+  const files = [["manifest.json", opened.manifestBytes()]];
+  const signature = opened.signature();
+  if (signature !== undefined) files.push(["manifest.sig", signature]);
   for (const path of opened.paths()) files.push([path, opened.file(path)]);
   for (const [path, bytes] of files) {
     const target = resolve(root, path);
@@ -477,14 +625,6 @@ function unpack(opened, directory) {
       throw new Failed(`${target}: ${message(e)}`);
     }
   }
-}
-
-function sortKeys(value) {
-  if (Array.isArray(value)) return value.map(sortKeys);
-  if (value && typeof value === "object") {
-    return Object.fromEntries(Object.keys(value).sort().map((k) => [k, sortKeys(value[k])]));
-  }
-  return value;
 }
 
 // ---- Run ----

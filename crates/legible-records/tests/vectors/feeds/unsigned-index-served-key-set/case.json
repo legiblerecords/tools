@@ -1,0 +1,22 @@
+{
+  "connection": {
+    "$type": "org.legiblerecords.feed-connection",
+    "auth": {
+      "method": "bearer",
+      "token_env": "ACME_FEED_TOKEN"
+    },
+    "feed": "acme.example/track",
+    "location": {
+      "kind": "https",
+      "url": "https://feeds.acme.example/track/"
+    },
+    "version": 1
+  },
+  "expect": {
+    "index": "unsigned_from_pinned_publisher",
+    "key_set": "needs_approval",
+    "streams": {}
+  },
+  "name": "unsigned-index-served-key-set",
+  "state": null
+}

@@ -1,0 +1,11 @@
+{
+  "expect": {
+    "status": "unverified"
+  },
+  "expected_publisher": null,
+  "name": "unsigned",
+  "trust": {
+    "key_sets": [],
+    "pins": []
+  }
+}

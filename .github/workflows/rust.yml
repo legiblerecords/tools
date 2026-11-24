@@ -17,5 +17,42 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
       - run: cargo fmt --all --check
-      - run: cargo clippy --all-targets --locked -- -D warnings
-      - run: cargo test --locked
+      - run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      # SeaweedFS for the S3 test in crates/legible-records/tests/net.rs,
+      # which fails rather than skips in CI if LEGIBLE_TEST_S3_ENDPOINT isn't
+      # set. Its one-command mode makes the bucket and turns on SigV4 auth
+      # for the key given. Pinned by tag and digest.
+      - name: Start SeaweedFS
+        run: |
+          docker run -d --name seaweedfs -p 8333:8333 \
+            -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=testtesttest -e S3_BUCKET=legible-test \
+            chrislusf/seaweedfs:4.55@sha256:7ca46aeae2f223b37e5d91593c17ab37738eec6df6ab69b48a0487f7643342b9
+          for i in $(seq 1 60); do
+            curl -s -o /dev/null http://127.0.0.1:8333/ && break
+            sleep 1
+          done
+          curl -s -o /dev/null http://127.0.0.1:8333/
+          # The port answers before the bucket exists: wait for a signed HEAD
+          # of the bucket to give 200, and fail the step if it never does.
+          bucket() {
+            curl -s -o /dev/null -w '%{http_code}' -I \
+              --aws-sigv4 "aws:amz:us-east-1:s3" --user test:testtesttest \
+              http://127.0.0.1:8333/legible-test
+          }
+          for i in $(seq 1 60); do
+            [ "$(bucket)" = 200 ] && break
+            sleep 1
+          done
+          status=$(bucket)
+          if [ "$status" != 200 ]; then
+            echo "SeaweedFS bucket legible-test isn't there (HEAD gave $status)"
+            docker logs seaweedfs
+            exit 1
+          fi
+          {
+            echo "LEGIBLE_TEST_S3_ENDPOINT=http://127.0.0.1:8333"
+            echo "LEGIBLE_TEST_S3_ACCESS_KEY=test"
+            echo "LEGIBLE_TEST_S3_SECRET_KEY=testtesttest"
+            echo "LEGIBLE_TEST_S3_BUCKET=legible-test"
+          } >> "$GITHUB_ENV"
+      - run: cargo test --workspace --all-features --locked

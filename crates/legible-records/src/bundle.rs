@@ -3,18 +3,27 @@
 //!
 //! [`pack`] builds a bundle from files; [`open`] reads one back, refusing
 //! unsafe paths and oversized contents; [`verify`] checks hashes, the file
-//! list and references. Encryption is a separate step around the zip.
+//! list and references. A bundle may carry `manifest.sig`, a signature over
+//! the manifest's stored bytes: [`pack_with`] and [`add_signature`] write it
+//! and [`check_signature`] reads it. Encryption is a separate step around
+//! the zip.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Read, Write};
 
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
+
+use crate::code::Code;
+use crate::keys::{KeyState, Lookup, Trust};
+use crate::sign::{self, Context, SignatureFile, SigningKey};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, DateTime, ZipArchive, ZipWriter};
 
 /// The manifest's own path in a bundle.
 pub const MANIFEST: &str = "manifest.json";
+/// The manifest signature's path in a bundle.
+pub const SIGNATURE: &str = "manifest.sig";
 /// The manifest's type.
 pub const BUNDLE_TYPE: &str = "org.legiblerecords.bundle";
 
@@ -23,6 +32,20 @@ pub const BUNDLE_TYPE: &str = "org.legiblerecords.bundle";
 pub struct Limits {
     pub max_files: usize,
     pub max_total_bytes: u64,
+}
+
+impl Limits {
+    /// The most a bundle's stored file (its zip, or its `.zip.age`) may
+    /// hold, for a reader to cap a download or a decryption at before
+    /// [`open`] checks the contents: the files' total, plus room for the
+    /// zip's headers (up to 1 KiB a file) and age's framing (16 bytes in
+    /// every 64 KiB, and its header).
+    pub fn max_stored_bytes(&self) -> u64 {
+        self.max_total_bytes
+            .saturating_add(self.max_total_bytes / 1024)
+            .saturating_add((self.max_files as u64).saturating_mul(1024))
+            .saturating_add(64 * 1024)
+    }
 }
 
 impl Default for Limits {
@@ -58,11 +81,44 @@ pub struct Packed {
     pub attachments: Vec<Attachment>,
 }
 
-/// An opened bundle: its manifest, and every other file by path.
+/// An opened bundle: its manifest (parsed, and as stored, which is what a
+/// signature covers), its signature if it has one, and every other file by
+/// path. `files` holds neither `manifest.json` nor `manifest.sig`.
 #[derive(Clone, Debug)]
 pub struct Opened {
     pub manifest: Value,
+    pub manifest_bytes: Vec<u8>,
+    pub signature: Option<Vec<u8>>,
     pub files: BTreeMap<String, Vec<u8>>,
+}
+
+/// What [`pack_with`] adds to a bundle beyond its files.
+#[derive(Default)]
+pub struct PackOptions<'a> {
+    /// The manifest's `produced_by`.
+    pub produced_by: Option<Value>,
+    /// The manifest's `published_at`, an RFC 3339 instant.
+    pub published_at: Option<String>,
+    /// The feed id and stream id the bundle is published under.
+    pub feed: Option<(String, String)>,
+    /// Signs the manifest, writing `manifest.sig`.
+    pub signer: Option<&'a SigningKey>,
+}
+
+/// What [`check_signature`] found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SignatureStatus {
+    /// Signed by a trusted key that is active or retired: its publisher, its
+    /// id, and its public key. A key's identity is all three; a destination
+    /// matches a revocation to what it holds by publisher and public key
+    /// (feeds.md § Trust).
+    Verified {
+        publisher: String,
+        key: String,
+        public_key: [u8; 32],
+    },
+    /// Not signed, and from no publisher the reader trusts.
+    Unverified,
 }
 
 /// What [`verify`] found.
@@ -160,6 +216,20 @@ pub fn pack(
     schemas: &[Value],
     produced_by: Option<Value>,
 ) -> Result<Packed, Vec<String>> {
+    let options = PackOptions {
+        produced_by,
+        ..PackOptions::default()
+    };
+    pack_with(inputs, schemas, &options)
+}
+
+/// [`pack`] with the rest of what a manifest may say, and optionally a
+/// signature over it.
+pub fn pack_with(
+    inputs: &[Input],
+    schemas: &[Value],
+    options: &PackOptions,
+) -> Result<Packed, Vec<String>> {
     let mut problems = Vec::new();
     let mut files: BTreeMap<String, (Vec<u8>, Map<String, Value>)> = BTreeMap::new();
     let mut attachments = Vec::new();
@@ -234,9 +304,39 @@ pub fn pack(
         })
         .collect();
     let mut manifest = json!({"$type": BUNDLE_TYPE, "version": 1, "files": listed});
-    if let Some(produced_by) = produced_by {
-        manifest["produced_by"] = produced_by;
+    if let Some(produced_by) = &options.produced_by {
+        manifest["produced_by"] = produced_by.clone();
     }
+    if let Some(published_at) = &options.published_at {
+        manifest["published_at"] = json!(published_at);
+    }
+    if let Some((id, stream)) = &options.feed {
+        manifest["feed"] = json!({"id": id, "stream": stream});
+    }
+    let manifest_bytes = canonical_record(&manifest);
+    let signature = options
+        .signer
+        .map(|key| sign::sign(key, Context::Manifest, &manifest_bytes).to_bytes());
+    let stored: BTreeMap<&str, &[u8]> = files
+        .iter()
+        .map(|(path, (bytes, _))| (path.as_str(), bytes.as_slice()))
+        .collect();
+    let zip = write_zip(&manifest_bytes, &stored, signature.as_deref())?;
+    Ok(Packed {
+        zip,
+        manifest,
+        attachments,
+    })
+}
+
+/// Writes the zip: the manifest, the files in path order, then the
+/// signature. The same entries and options every time, so the same inputs
+/// give the same bytes.
+fn write_zip(
+    manifest_bytes: &[u8],
+    files: &BTreeMap<&str, &[u8]>,
+    signature: Option<&[u8]>,
+) -> Result<Vec<u8>, Vec<String>> {
     let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
     let options = SimpleFileOptions::default()
         .compression_method(CompressionMethod::Deflated)
@@ -247,18 +347,99 @@ pub fn pack(
             .and_then(|()| writer.write_all(bytes).map_err(Into::into))
             .map_err(|e| format!("{path}: {e}"))
     };
-    write(MANIFEST, &canonical_record(&manifest)).map_err(|e| vec![e])?;
-    for (path, (bytes, _)) in &files {
+    write(MANIFEST, manifest_bytes).map_err(|e| vec![e])?;
+    for (path, bytes) in files {
         write(path, bytes).map_err(|e| vec![e])?;
     }
-    let zip = writer
+    if let Some(signature) = signature {
+        write(SIGNATURE, signature).map_err(|e| vec![e])?;
+    }
+    Ok(writer
         .finish()
         .map_err(|e| vec![format!("zip: {e}")])?
-        .into_inner();
-    Ok(Packed {
-        zip,
-        manifest,
-        attachments,
+        .into_inner())
+}
+
+/// Adds `manifest.sig` to a bundle's zip, signing its manifest as stored.
+/// Everything else is written as [`pack`] writes it. A bundle that already
+/// has a signature is refused: sign the bundle once, or pack it again.
+pub fn add_signature(zip: &[u8], key: &SigningKey, limits: Limits) -> Result<Vec<u8>, Vec<String>> {
+    let opened = open(zip, limits)?;
+    if opened.signature.is_some() {
+        return Err(vec![format!("{SIGNATURE}: the bundle is already signed")]);
+    }
+    let signature = sign::sign(key, Context::Manifest, &opened.manifest_bytes).to_bytes();
+    let files: BTreeMap<&str, &[u8]> = opened
+        .files
+        .iter()
+        .map(|(path, bytes)| (path.as_str(), bytes.as_slice()))
+        .collect();
+    write_zip(&opened.manifest_bytes, &files, Some(&signature))
+}
+
+/// Checks a bundle's signature against what the reader trusts, as
+/// [`check_signed`] does for `manifest.sig` over the stored manifest.
+///
+/// This checks the signature only; run [`verify`] for the bundle's own checks.
+pub fn check_signature(
+    bundle: &Opened,
+    trust: &Trust,
+    expected_publisher: Option<&str>,
+) -> Result<SignatureStatus, Code> {
+    check_signed(
+        bundle.signature.as_deref(),
+        Context::Manifest,
+        &bundle.manifest_bytes,
+        trust,
+        expected_publisher,
+    )
+}
+
+/// Checks a signature file (`manifest.sig` or `feed.sig`) over `message`
+/// against what the reader trusts, in the order of records.md § Reading a
+/// signed bundle: the signature file (`bad_signature_file`), its `alg`
+/// (`unknown_alg`), its signature's encoding (`bad_signature_file`); its
+/// publisher is `expected_publisher`, when given (`publisher_mismatch`); its
+/// key, as [`Trust::lookup`] finds it (`unknown_key`, `revoked_key` at any
+/// date, `unknown_alg`); then the signature (`bad_signature`). A retired key
+/// still verifies.
+///
+/// No signature is [`SignatureStatus::Unverified`], unless the reader
+/// trusts `expected_publisher` ([`Trust::trusts_publisher`]): then it is
+/// `unsigned_from_pinned_publisher`.
+pub fn check_signed(
+    signature: Option<&[u8]>,
+    context: Context,
+    message: &[u8],
+    trust: &Trust,
+    expected_publisher: Option<&str>,
+) -> Result<SignatureStatus, Code> {
+    let Some(bytes) = signature else {
+        return match expected_publisher {
+            Some(publisher) if trust.trusts_publisher(publisher) => {
+                Err(Code::UnsignedFromPinnedPublisher)
+            }
+            _ => Ok(SignatureStatus::Unverified),
+        };
+    };
+    // The file, its alg, then its signature's encoding.
+    let file = SignatureFile::parse(bytes)?;
+    if expected_publisher.is_some_and(|publisher| publisher != file.publisher) {
+        return Err(Code::PublisherMismatch);
+    }
+    let (key, state) = match trust.lookup(&file.publisher, &file.key) {
+        Lookup::Found(key, state) => (key, state),
+        Lookup::Unknown => return Err(Code::UnknownKey),
+        Lookup::UnknownAlg => return Err(Code::UnknownAlg),
+    };
+    if state == KeyState::Revoked {
+        return Err(Code::RevokedKey);
+    }
+    sign::verify(&key, context, message, &file)?;
+    Ok(SignatureStatus::Verified {
+        publisher: file.publisher,
+        key: file.key,
+        public_key: key.key,
     })
 }
 
@@ -279,6 +460,14 @@ pub fn is_safe_path(path: &str) -> bool {
 pub fn open(zip: &[u8], limits: Limits) -> Result<Opened, Vec<String>> {
     let mut archive =
         ZipArchive::new(Cursor::new(zip)).map_err(|e| vec![format!("not a zip file: {e}")])?;
+    // The zip reader keeps one entry per name and drops the rest, so repeats
+    // would never reach the check below: two entries named manifest.json or
+    // manifest.sig must not let a reader and a signer see different files.
+    if archive.has_duplicate_names() {
+        return Err(vec![
+            "a file name appears twice in the zip's central directory".to_owned(),
+        ]);
+    }
     if archive.len() > limits.max_files {
         return Err(vec![format!(
             "the bundle holds {} entries; the limit is {}",
@@ -297,9 +486,6 @@ pub fn open(zip: &[u8], limits: Limits) -> Result<Opened, Vec<String>> {
                 continue;
             }
         };
-        if entry.is_dir() {
-            continue;
-        }
         let path = match entry.name() {
             Ok(name) => name.into_owned(),
             Err(e) => {
@@ -307,8 +493,17 @@ pub fn open(zip: &[u8], limits: Limits) -> Result<Opened, Vec<String>> {
                 continue;
             }
         };
-        if !is_safe_path(&path) {
+        // A directory's name is checked as well, and then it is skipped.
+        let checked = if entry.is_dir() {
+            path.strip_suffix('/').unwrap_or(&path)
+        } else {
+            path.as_str()
+        };
+        if !is_safe_path(checked) {
             problems.push(format!("{path}: not a safe path inside a bundle"));
+            continue;
+        }
+        if entry.is_dir() {
             continue;
         }
         let remaining = limits.max_total_bytes.saturating_sub(total);
@@ -329,6 +524,7 @@ pub fn open(zip: &[u8], limits: Limits) -> Result<Opened, Vec<String>> {
             problems.push(format!("{path}: appears twice"));
         }
     }
+    let signature = files.remove(SIGNATURE);
     let Some(manifest_bytes) = files.remove(MANIFEST) else {
         problems.push(format!("no {MANIFEST}"));
         return Err(problems);
@@ -341,10 +537,35 @@ pub fn open(zip: &[u8], limits: Limits) -> Result<Opened, Vec<String>> {
         }
     };
     if problems.is_empty() {
-        Ok(Opened { manifest, files })
+        Ok(Opened {
+            manifest,
+            manifest_bytes,
+            signature,
+            files,
+        })
     } else {
         Err(problems)
     }
+}
+
+/// [`verify`], and also that the manifest's `published_at`, when it has
+/// one, is no more than 24 hours after the reader's clock `now`
+/// (records.md § Bundles). A reader passes its own clock.
+pub fn verify_at(bundle: &Opened, schemas: &[Value], now: crate::time::Instant) -> Report {
+    let mut report = verify(bundle, schemas);
+    if let Some(Ok(at)) = bundle
+        .manifest
+        .get("published_at")
+        .and_then(Value::as_str)
+        .map(crate::time::parse)
+    {
+        if crate::keys::too_far_ahead(at, now) {
+            report.problems.push(format!(
+                "{MANIFEST}: published_at is more than 24 hours after this reader's clock"
+            ));
+        }
+    }
+    report
 }
 
 /// Checks an opened bundle: the manifest's type, every hash, that the
@@ -357,6 +578,13 @@ pub fn verify(bundle: &Opened, schemas: &[Value]) -> Report {
     let mut report = Report::default();
     let problems = &mut report.problems;
     let manifest = &bundle.manifest;
+    match manifest.get("published_at") {
+        None => {}
+        Some(Value::String(text)) if crate::time::parse(text).is_ok() => {}
+        Some(_) => problems.push(format!(
+            "{MANIFEST}: published_at is not an RFC 3339 date-time"
+        )),
+    }
     if manifest.get("$type") != Some(&json!(BUNDLE_TYPE))
         || manifest.get("version") != Some(&json!(1))
     {

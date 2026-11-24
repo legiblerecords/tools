@@ -1,0 +1,6 @@
+{
+  "expect": "bad_key_set",
+  "name": "non-canonical-public-key",
+  "pins": [],
+  "previous": null
+}

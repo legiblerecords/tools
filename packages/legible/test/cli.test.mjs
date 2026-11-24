@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -166,4 +166,127 @@ test("age recipients and identities", async () => {
   assert.equal(both.status, 2);
   const armorAlone = run(dir, ["bundle", "pack", "in", "-o", "x.zip", "--armor"]);
   assert.equal(armorAlone.status, 2);
+});
+
+function packPlain(dir) {
+  const packed = run(dir, ["bundle", "pack", "in", "-o", "b.zip", "-s", "control.yaml", ...BASE]);
+  assert.equal(packed.status, 0, packed.stderr);
+}
+
+test("sign then verify with pin", () => {
+  const dir = workspace();
+  packPlain(dir);
+  const made = run(dir, ["keys", "new", "--publisher", "acme.example", "--id", "2026-11", "-o", "key.json"]);
+  assert.equal(made.status, 0, made.stderr);
+  const entry = JSON.parse(made.stdout);
+  assert.equal(entry.id, "2026-11");
+  // Only the key-set entry is printed, never the secret.
+  assert.ok(!made.stdout.includes(JSON.parse(readFileSync(join(dir, "key.json"), "utf8")).seed));
+  assert.equal(statSync(join(dir, "key.json")).mode & 0o777, 0o600);
+
+  const signed = run(dir, ["bundle", "sign", "b.zip", "-k", "key.json", "-o", "s.zip"]);
+  assert.equal(signed.status, 0, signed.stderr);
+  const again = run(dir, ["bundle", "sign", "s.zip", "-k", "key.json", "-o", "s2.zip"]);
+  assert.equal(again.status, 1);
+
+  const pin = `acme.example/2026-11=${entry.public_key}`;
+  const ok = run(dir, ["bundle", "verify", "s.zip", "-s", "control.yaml", ...BASE, "--pin", pin]);
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.match(ok.stdout, /^signature: verified \(acme\.example 2026-11\)$/m);
+
+  const none = run(dir, ["bundle", "verify", "s.zip", "-s", "control.yaml", ...BASE]);
+  assert.equal(none.status, 0);
+  assert.match(none.stdout, /^signature: unverified \(signed by acme\.example 2026-11; no trusted keys given\)$/m);
+
+  const other = run(dir, ["keys", "new", "--publisher", "acme.example", "--id", "2026-11", "-o", "other.json"]);
+  const wrong = run(dir, ["bundle", "verify", "s.zip", "--pin", `acme.example/2026-11=${JSON.parse(other.stdout).public_key}`]);
+  assert.equal(wrong.status, 1);
+  assert.match(wrong.stdout, /^signature: bad_signature$/m);
+
+  const keySet = { $type: "org.legiblerecords.keys", version: 1, publisher: "acme.example", updated_at: entry.created_at, keys: [entry] };
+  writeFileSync(join(dir, "keys.json"), JSON.stringify(keySet));
+  const viaSet = run(dir, ["bundle", "verify", "s.zip", "--key-set", "keys.json"]);
+  assert.equal(viaSet.status, 0, viaSet.stdout + viaSet.stderr);
+  assert.match(viaSet.stdout, /^signature: verified/m);
+
+  const badPin = run(dir, ["bundle", "verify", "s.zip", "--pin", "nonsense"]);
+  assert.equal(badPin.status, 2);
+  const unpacked = run(dir, ["bundle", "unpack", "s.zip", "-d", "out", "--pin", pin]);
+  assert.equal(unpacked.status, 0, unpacked.stderr);
+  assert.match(unpacked.stdout, /signature: verified/);
+  const tampered = run(dir, ["bundle", "unpack", "s.zip", "-d", "out2", "--pin", `acme.example/2026-11=${JSON.parse(other.stdout).public_key}`]);
+  assert.equal(tampered.status, 1);
+  assert.equal(existsSync(join(dir, "out2")), false);
+});
+
+test("verify unsigned prints unverified", () => {
+  const dir = workspace();
+  packPlain(dir);
+  const result = run(dir, ["bundle", "verify", "b.zip", "-s", "control.yaml", ...BASE]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /^signature: unverified$/m);
+  const pinned = run(dir, ["bundle", "verify", "b.zip", "--pin", `acme.example/2026-11=${"A".repeat(43)}`]);
+  assert.equal(pinned.status, 0);
+});
+
+test("keys new refuses overwrite", () => {
+  const dir = workspace();
+  const args = ["keys", "new", "--publisher", "acme.example", "--id", "2026-11", "-o", "key.json"];
+  assert.equal(run(dir, args).status, 0);
+  const before = readFileSync(join(dir, "key.json"));
+  const second = run(dir, args);
+  assert.equal(second.status, 2);
+  assert.deepEqual(readFileSync(join(dir, "key.json")), before);
+  const stdout = run(dir, ["keys", "new", "--publisher", "acme.example", "--id", "x", "-o", "-"]);
+  assert.equal(stdout.status, 2);
+  assert.equal(stdout.stdout, "");
+});
+
+test("unpack keeps a signed bundle's manifest and signature as stored; --key-set errors name the file", async () => {
+  const { createRequire } = await import("node:module");
+  const legible = createRequire(import.meta.url)("../dist/legible_records_wasm.cjs");
+  const dir = workspace();
+  packPlain(dir);
+  const made = run(dir, ["keys", "new", "--publisher", "acme.example", "--id", "2026-11", "-o", "key.json"]);
+  const entry = JSON.parse(made.stdout);
+  assert.equal(run(dir, ["bundle", "sign", "b.zip", "-k", "key.json", "-o", "s.zip"]).status, 0);
+  const pin = `acme.example/2026-11=${entry.public_key}`;
+
+  const unpacked = run(dir, ["bundle", "unpack", "s.zip", "-d", "out", "--pin", pin]);
+  assert.equal(unpacked.status, 0, unpacked.stderr);
+  const opened = legible.Bundle.open(readFileSync(join(dir, "s.zip")));
+  try {
+    assert.deepEqual(new Uint8Array(readFileSync(join(dir, "out", "manifest.json"))), opened.manifestBytes());
+    assert.deepEqual(new Uint8Array(readFileSync(join(dir, "out", "manifest.sig"))), opened.signature());
+  } finally {
+    opened.free();
+  }
+  // What was unpacked verifies again once packed by the Rust tool's rules: the signature
+  // covers the manifest's stored bytes, which unpack kept.
+  assert.ok(readdirSync(join(dir, "out")).includes("manifest.sig"));
+
+  // A key set that isn't one: exit 2, naming that file and no other.
+  writeFileSync(join(dir, "good.json"), JSON.stringify({ $type: "org.legiblerecords.keys", version: 1, publisher: "acme.example", updated_at: entry.created_at, keys: [entry] }));
+  writeFileSync(join(dir, "bad.json"), "{ not json");
+  const bad = run(dir, ["bundle", "verify", "s.zip", "--key-set", "good.json", "--key-set", "bad.json"]);
+  assert.equal(bad.status, 2);
+  assert.match(bad.stderr, /bad\.json: bad_key_set/);
+  assert.doesNotMatch(bad.stderr, /good\.json/);
+  assert.equal(bad.stdout, "");
+
+  // A pin and a key set together that agree: verified. One that disagrees with the set: unknown_key.
+  const both = run(dir, ["bundle", "verify", "s.zip", "--pin", pin, "--key-set", "good.json"]);
+  assert.equal(both.status, 0, both.stdout + both.stderr);
+  assert.match(both.stdout, /^signature: verified \(acme\.example 2026-11\)$/m);
+  const other = JSON.parse(run(dir, ["keys", "new", "--publisher", "acme.example", "--id", "x", "-o", "other.json"]).stdout);
+  const clash = run(dir, ["bundle", "verify", "s.zip", "--pin", `acme.example/2026-11=${other.public_key}`, "--key-set", "good.json"]);
+  assert.equal(clash.status, 1);
+  assert.match(clash.stdout, /^signature: unknown_key$/m);
+
+  // An IP address is not a publisher.
+  assert.equal(run(dir, ["bundle", "verify", "s.zip", "--pin", `10.0.0.1/k=${entry.public_key}`]).status, 2);
+  // The bundle and the identity can't both come from stdin.
+  const stdin = run(dir, ["bundle", "verify", "-", "-i", "-"]);
+  assert.equal(stdin.status, 2);
+  assert.match(stdin.stderr, /-i -/);
 });
