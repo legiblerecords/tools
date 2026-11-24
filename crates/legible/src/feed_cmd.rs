@@ -582,6 +582,7 @@ fn publish(args: PublishArgs) -> Result<(), Stop> {
             published_at: Some(published_at.clone()),
             feed: Some((args.feed.clone(), args.stream.clone())),
             signer: key.as_ref(),
+            ..PackOptions::default()
         };
         let packed = bundle::pack_with(&inputs, &[], &options).map_err(|problems| {
             problems.iter().for_each(|p| eprintln!("{p}"));

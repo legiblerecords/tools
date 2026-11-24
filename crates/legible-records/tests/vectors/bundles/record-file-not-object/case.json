@@ -1,0 +1,11 @@
+{
+  "expect": {
+    "error": "bad_bundle"
+  },
+  "expected_publisher": null,
+  "name": "record-file-not-object",
+  "trust": {
+    "key_sets": [],
+    "pins": []
+  }
+}

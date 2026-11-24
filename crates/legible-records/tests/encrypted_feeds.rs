@@ -93,6 +93,7 @@ fn encrypted_feed(recipient: &str, armored_index: bool) -> Mem {
         published_at: Some("2026-11-24T10:00:00Z".to_owned()),
         feed: Some(("acme.example/track".to_owned(), "notes".to_owned())),
         signer: Some(&signer),
+        ..PackOptions::default()
     };
     let zip = pack_with(&inputs, &[], &options).unwrap().zip;
     let sealed = encrypt(&zip, std::slice::from_ref(&recipient.to_owned())).unwrap();
@@ -322,6 +323,7 @@ fn encrypted_bundle_past_limits_fails_before_opening() {
         published_at: Some("2026-11-24T10:00:00Z".to_owned()),
         feed: Some(("acme.example/track".to_owned(), "notes".to_owned())),
         signer: Some(&signer),
+        ..PackOptions::default()
     };
     let zip = pack_with(&inputs, &[], &options).unwrap().zip;
     let limits = Limits {

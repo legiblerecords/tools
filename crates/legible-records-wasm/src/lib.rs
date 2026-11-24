@@ -232,12 +232,47 @@ pub fn sign_bundle(zip: &[u8], secret_key: &[u8]) -> Result<Vec<u8>, JsError> {
     bundle::add_signature(zip, &key, bundle::Limits::default()).map_err(|p| problems_error(&p))
 }
 
+/// Checks a record set's bytes against its manifest entry, `{ recordType,
+/// recordVersion, count, sha256 }`, and returns its records. Throws with the
+/// first problem, naming its line.
+#[wasm_bindgen(js_name = recordSet)]
+pub fn record_set(bytes: &[u8], expect: JsValue) -> Result<JsValue, JsError> {
+    let expect = from_js(expect, "expect")?;
+    let field = |key: &str| {
+        expect
+            .get(key)
+            .ok_or_else(|| JsError::new(&format!("expect.{key} is missing")))
+    };
+    let (Some(record_type), Some(record_version), Some(count), Some(sha256)) = (
+        field("recordType")?.as_str(),
+        field("recordVersion")?.as_u64(),
+        field("count")?.as_u64(),
+        field("sha256")?.as_str(),
+    ) else {
+        return Err(JsError::new(
+            "expect needs recordType and sha256 strings, and recordVersion and count integers",
+        ));
+    };
+    let records = legible_records::record_set::check(
+        bytes,
+        legible_records::record_set::Expect {
+            record_type,
+            record_version,
+            count,
+            sha256,
+        },
+    )
+    .map_err(|p| problems_error(&p))?;
+    to_js(&records)
+}
+
 /// Builds a bundle: `add` each file, then `finish`. A `.json` file with
 /// `$type` and `version` becomes a record; anything else an attachment.
 #[wasm_bindgen]
 #[derive(Default)]
 pub struct BundleBuilder {
     inputs: Vec<bundle::Input>,
+    sets: bundle::SetMode,
 }
 
 #[wasm_bindgen]
@@ -247,9 +282,22 @@ impl BundleBuilder {
         BundleBuilder::default()
     }
 
-    /// Adds a file by its name and bytes.
+    /// Adds a file by its name and bytes. A `.ndjson` file is a record set
+    /// and is packed as it is.
     pub fn add(&mut self, name: String, bytes: Vec<u8>) {
         self.inputs.push(bundle::Input { name, bytes });
+    }
+
+    /// Writes these kinds as record sets, whatever their size.
+    #[wasm_bindgen(js_name = setKinds)]
+    pub fn set_kinds(&mut self, kinds: Vec<String>) {
+        self.sets = bundle::SetMode::Kinds(kinds);
+    }
+
+    /// Writes every record as its own file (`.ndjson` inputs stay sets).
+    #[wasm_bindgen(js_name = noSets)]
+    pub fn no_sets(&mut self) {
+        self.sets = bundle::SetMode::Never;
     }
 
     /// Packs the files. `schemas` (expanded, optional) give each record's
@@ -262,8 +310,13 @@ impl BundleBuilder {
         } else {
             Some(from_js(produced_by, "producedBy")?)
         };
+        let options = bundle::PackOptions {
+            produced_by,
+            sets: self.sets.clone(),
+            ..bundle::PackOptions::default()
+        };
         let packed =
-            bundle::pack(&self.inputs, &schemas, produced_by).map_err(|p| problems_error(&p))?;
+            bundle::pack_with(&self.inputs, &schemas, &options).map_err(|p| problems_error(&p))?;
         Ok(PackedBundle { packed })
     }
 }
@@ -328,6 +381,34 @@ impl Bundle {
     /// A file's bytes, or `undefined`.
     pub fn file(&self, path: &str) -> Option<Vec<u8>> {
         self.opened.files.get(path).cloned()
+    }
+
+    /// The bundle's record sets: `[{ path, recordType, recordVersion, count }]`.
+    #[wasm_bindgen(js_name = recordSets)]
+    pub fn record_sets(&self) -> Result<JsValue, JsError> {
+        let sets: Vec<Value> = self
+            .opened
+            .manifest
+            .get("files")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|f| {
+                f.get("path")
+                    .and_then(Value::as_str)
+                    .and_then(legible_records::record_set::kind_of_path)
+                    .is_some()
+            })
+            .map(|f| {
+                serde_json::json!({
+                    "path": f["path"],
+                    "recordType": f["record_type"],
+                    "recordVersion": f["record_version"],
+                    "count": f["count"],
+                })
+            })
+            .collect();
+        to_js(&sets)
     }
 
     /// The manifest's bytes exactly as stored: what a signature covers.

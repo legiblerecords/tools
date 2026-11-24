@@ -166,6 +166,14 @@ enum BundleCommand {
         /// title, or the type's last segment when no schema is given.
         #[arg(long = "schema", short = 's')]
         schemas: Vec<PathBuf>,
+        /// Write this kind's records as one record set, records/<kind>.ndjson; repeat for
+        /// several. Without it, a kind with more than 1,000 records (across its versions) is
+        /// written as a set. .ndjson inputs are always packed as the sets they are.
+        #[arg(long = "set", value_name = "KIND", conflicts_with = "no_sets")]
+        sets: Vec<String>,
+        /// Write every record as its own file (except .ndjson inputs).
+        #[arg(long = "no-sets")]
+        no_sets: bool,
         #[command(flatten)]
         schema: SchemaArgs,
     },
@@ -385,6 +393,8 @@ fn run_bundle(command: BundleCommand) -> Result<(), Stop> {
             inputs,
             output,
             schemas,
+            sets,
+            no_sets,
             schema,
         } => {
             let bodies = load_schemas(&schemas, &schema)?;
@@ -403,7 +413,18 @@ fn run_bundle(command: BundleCommand) -> Result<(), Stop> {
                 "app": "legible",
                 "version": env!("CARGO_PKG_VERSION"),
             });
-            let packed = bundle::pack(&files, &bodies, Some(produced_by)).map_err(|problems| {
+            let options = bundle::PackOptions {
+                produced_by: Some(produced_by),
+                sets: if no_sets {
+                    bundle::SetMode::Never
+                } else if sets.is_empty() {
+                    bundle::SetMode::Auto
+                } else {
+                    bundle::SetMode::Kinds(sets)
+                },
+                ..bundle::PackOptions::default()
+            };
+            let packed = bundle::pack_with(&files, &bodies, &options).map_err(|problems| {
                 problems.iter().for_each(|p| eprintln!("{p}"));
                 Stop::Problems
             })?;

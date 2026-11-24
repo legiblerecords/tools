@@ -1,0 +1,11 @@
+{
+  "expect": {
+    "status": "unverified"
+  },
+  "expected_publisher": null,
+  "name": "record-set-mixed-versions",
+  "trust": {
+    "key_sets": [],
+    "pins": []
+  }
+}

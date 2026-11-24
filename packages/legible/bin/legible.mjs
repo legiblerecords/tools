@@ -29,7 +29,7 @@ Usage:
   legible lint <schema.yaml|.json> [schema options]
   legible check-compat <old> <new> [schema options]
   legible validate -s <schema>... <record.json>... [schema options]
-  legible bundle pack <file|dir>... -o <bundle> [-s <schema>]... [encryption]
+  legible bundle pack <file|dir>... -o <bundle> [-s <schema>]... [--set <kind>]... [--no-sets] [encryption]
   legible bundle unpack <bundle> -d <dir> [-s <schema>]... [-i <identity>] [trust]
   legible bundle verify <bundle> [-s <schema>]... [-i <identity>] [trust]
   legible bundle sign <bundle> -k <key> -o <signed-bundle>
@@ -137,13 +137,18 @@ async function bundle([action, ...rest]) {
           passphrase: { type: "boolean" },
           recipient: { type: "string", short: "r", multiple: true },
           armor: { type: "boolean" },
+          set: { type: "string", multiple: true },
+          "no-sets": { type: "boolean" },
         },
         -1,
       );
       if (!positionals.length) throw new Failed("bundle pack needs files or directories to pack");
+      if (values.set?.length && values["no-sets"]) throw new Failed("--set and --no-sets can't be used together");
       if (!values.output) throw new Failed("bundle pack needs -o <bundle>, or -o - for stdout");
       const schemas = (values.schema ?? []).map((s) => loadSchema(s, values));
       const builder = new legible.BundleBuilder();
+      if (values.set?.length) builder.setKinds(values.set);
+      if (values["no-sets"]) builder.noSets();
       try {
         for (const file of positionals.flatMap((p) => collect(p))) {
           builder.add(basename(file), readFileSync(file));
