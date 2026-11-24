@@ -62,7 +62,7 @@ fn signed_bundle_vectors() {
                 Ok(_) if !verify_at(&opened, &[], now).problems.is_empty() => {
                     json!({"error": Code::BadBundle.as_str()})
                 }
-                Ok(SignatureStatus::Verified { publisher, key }) => {
+                Ok(SignatureStatus::Verified { publisher, key, .. }) => {
                     json!({"status": "verified", "publisher": publisher, "key": key})
                 }
                 Ok(SignatureStatus::Unverified) => json!({"status": "unverified"}),
@@ -135,7 +135,8 @@ fn pack_with_signer_verifies() {
         check_signature(&opened, &trusting(&key), Some("acme.example")),
         Ok(SignatureStatus::Verified {
             publisher: "acme.example".to_owned(),
-            key: "2026-11".to_owned()
+            key: "2026-11".to_owned(),
+            public_key: key.public().key,
         })
     );
     // Another key under the same id doesn't verify.
@@ -373,7 +374,8 @@ fn add_signature_signs_non_canonical_stored_manifest() {
         check_signature(&reopened, &trusting(&key), Some("acme.example")),
         Ok(SignatureStatus::Verified {
             publisher: "acme.example".to_owned(),
-            key: "2026-11".to_owned()
+            key: "2026-11".to_owned(),
+            public_key: key.public().key,
         })
     );
 }

@@ -1673,3 +1673,149 @@ fn deliveries_say_which_revocations_are_held() {
         assert_eq!(revocations[0].held, held);
     }
 }
+
+// ---- A pin a key set lists under another id (feeds.md § Trust). ----
+
+/// A key set for acme.example listing each `(id, key, revoked)`.
+fn key_set_with_ids(updated_at: &str, keys: &[(&str, &SigningKey, bool)]) -> Vec<u8> {
+    let keys: Vec<Value> = keys
+        .iter()
+        .map(|(id, k, revoked)| {
+            let mut entry = json!({"id": id, "alg": "ed25519",
+                "public_key": b64url(&k.public().key), "created_at": "2026-11-01T00:00:00Z"});
+            if *revoked {
+                entry["revoked_at"] = json!("2026-11-20T00:00:00Z");
+            }
+            entry
+        })
+        .collect();
+    serde_json::to_vec(&json!({"$type": "org.legiblerecords.keys", "version": 1,
+        "publisher": "acme.example", "updated_at": updated_at, "keys": keys}))
+    .unwrap()
+}
+
+fn one_stream_feed(updated_at: &str, signer: &SigningKey) -> MemSource {
+    build_feed(
+        updated_at,
+        &[Stream {
+            id: "notes",
+            published_at: updated_at,
+            signer: Some(signer),
+        }],
+        Some(signer),
+    )
+}
+
+#[test]
+fn stateful_pin_alias_in_held_set_is_unknown_key() {
+    // The connection pins a's bytes as "a"; the held set lists them as "a-b".
+    let a = key_a();
+    let set = key_set_with_ids("2026-11-24T00:00:00Z", &[("a-b", &a, false)]);
+    let mut state = ReaderState::default();
+    state
+        .key_sets
+        .insert("acme.example".to_owned(), KeySet::parse(&set).unwrap());
+    let before = state.clone();
+    let report = run(
+        &mut one_stream_feed("2026-11-24T10:00:00Z", &a),
+        &mut NoKeySource,
+        &conn_with(vec![pin(&a)]),
+        Some(&mut state),
+    );
+    assert_eq!(report.index, IndexOutcome::Refused(Code::UnknownKey));
+    assert!(report.streams.is_empty(), "{:?}", report.streams);
+    assert_eq!(state, before);
+}
+
+#[test]
+fn stateless_pin_alias_in_served_set_is_unknown_key() {
+    // A stateless reader pins a as "a"; the publisher serves, unendorsed, a
+    // set listing a's bytes as "a-b". It waits for approval, and still the
+    // pin no longer counts.
+    let a = key_a();
+    let set = key_set_with_ids("2026-11-24T00:00:00Z", &[("a-b", &a, false)]);
+    let mut keys = FixedKeys(Ok(Some((set, None))), Vec::new());
+    let report = run(
+        &mut one_stream_feed("2026-11-24T10:00:00Z", &a),
+        &mut keys,
+        &conn_with(vec![pin(&a)]),
+        None,
+    );
+    assert!(matches!(report.key_set, KeySetOutcome::Pending(_)));
+    assert_eq!(report.index, IndexOutcome::Refused(Code::UnknownKey));
+    assert!(report.streams.is_empty(), "{:?}", report.streams);
+}
+
+#[test]
+fn stateless_destination_matches_a_revocation_by_bytes() {
+    // A stateless reader pins a as "a" and c as "c". Poll 1: no key set; a
+    // signs. The destination keeps the signer with its public key. Poll 2:
+    // the publisher's set, endorsed by c, lists a's bytes as "a-old",
+    // revoked. The revocation names "a-old", not "a", so only the bytes
+    // link it to what the destination holds.
+    let a = key_a();
+    let c = SigningKey::from_seed("acme.example", "c", [9; 32]).unwrap();
+    let conn = conn_with(vec![pin(&a), pin(&c)]);
+    let mut held: Vec<(String, String, String, [u8; 32])> = Vec::new();
+    let report = pull(
+        &mut one_stream_feed("2026-11-24T10:00:00Z", &a),
+        &mut FixedKeys(Ok(None), Vec::new()),
+        &conn,
+        None,
+        &mut |d| {
+            let SignatureStatus::Verified {
+                publisher,
+                key,
+                public_key,
+            } = d.signature
+            else {
+                panic!("signed by a: {:?}", d.signature);
+            };
+            held.push((d.stream.id.clone(), publisher, key, public_key));
+            Ok(())
+        },
+        &options(),
+    );
+    assert_eq!(report.streams["notes"], StreamOutcome::Accepted);
+    assert_eq!(
+        held,
+        [(
+            "notes".to_owned(),
+            "acme.example".to_owned(),
+            "a".to_owned(),
+            a.public().key
+        )]
+    );
+
+    let set = key_set_with_ids(
+        "2026-11-25T00:00:00Z",
+        &[("c", &c, false), ("a-old", &a, true)],
+    );
+    let sig = sign(&c, Context::Keys, &set).to_bytes();
+    let mut revocations = Vec::new();
+    let report = pull(
+        &mut one_stream_feed("2026-11-25T10:00:00Z", &c),
+        &mut FixedKeys(Ok(Some((set, Some(sig)))), Vec::new()),
+        &conn,
+        None,
+        &mut |d| {
+            revocations = d.revocations;
+            Ok(())
+        },
+        &options(),
+    );
+    assert_eq!(report.key_set, KeySetOutcome::Accepted);
+    assert_eq!(report.streams["notes"], StreamOutcome::Accepted);
+    assert_eq!(report.revocations, revocations);
+    assert_eq!(revocations.len(), 1, "{revocations:?}");
+    let r = &revocations[0];
+    assert!(r.held);
+    assert_eq!(
+        (r.publisher.as_str(), r.id.as_str()),
+        ("acme.example", "a-old")
+    );
+    // By id the destination would miss it; by bytes it clears what a signed.
+    let (_, publisher, key, public_key) = &held[0];
+    assert!(!(r.publisher == *publisher && r.id == *key));
+    assert!(r.publisher == *publisher && r.public_key == *public_key);
+}

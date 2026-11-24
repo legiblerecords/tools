@@ -830,7 +830,7 @@ fn report_poll(
     for (id, outcome) in &report.streams {
         match outcome {
             StreamOutcome::Accepted => match signatures.get(id) {
-                Some(SignatureStatus::Verified { publisher, key }) => {
+                Some(SignatureStatus::Verified { publisher, key, .. }) => {
                     println!("{id}: accepted (verified {publisher} {key})")
                 }
                 _ => println!("{id}: accepted (unverified)"),

@@ -22,13 +22,15 @@ use crate::time::{self, Instant};
 ///
 /// A stateless reader's destination does the history checks itself, so each
 /// delivery carries what they need: the bundle's `published_at`, `sha256`
-/// (in `stream`) and signer (`signature`), the index's `updated_at` and
-/// stream ids, and the poll's `revocations`. The destination refuses an
+/// (in `stream`) and signer with its public key (`signature`), the index's
+/// `updated_at` and stream ids, and the poll's `revocations`, each with the
+/// revoked key's public key. The destination refuses an
 /// index older than the last it accepted and marks nothing withdrawn from
 /// it, ignores an unchanged hash, refuses a bundle older than the one it
 /// holds or as old with a different hash (a replay), and marks withdrawn the
 /// streams a newer index no longer lists. For a revocation marked `held`,
-/// it clears what that key signed as a reader with state does, keeping the
+/// it clears what that key signed, matching signers by publisher and public
+/// key rather than by id, as a reader with state does, keeping the
 /// `published_at` and `updated_at` it holds as floors; for one not held, it
 /// changes nothing.
 #[derive(Clone, Debug)]
@@ -39,7 +41,9 @@ pub struct Delivered {
     /// The bundle's zip exactly as stored, after decryption if the feed is
     /// encrypted: what a reader that keeps the file writes.
     pub zip: Vec<u8>,
-    /// Its signer (`Verified { publisher, key }`), or `Unverified`.
+    /// Its signer (`Verified { publisher, key, public_key }`), or
+    /// `Unverified`. A destination matches a revocation to it by publisher
+    /// and public key, not by id (feeds.md § Trust).
     pub signature: SignatureStatus,
     /// The bundle's `published_at`, as its manifest writes it: the same
     /// instant as the index entry's, which `pull` checks.
@@ -505,7 +509,7 @@ pub fn pull(
 /// The signer a reader records: who signed, or `None` for unsigned.
 fn signer_of(status: &SignatureStatus) -> Option<Signer> {
     match status {
-        SignatureStatus::Verified { publisher, key } => Some(Signer {
+        SignatureStatus::Verified { publisher, key, .. } => Some(Signer {
             publisher: publisher.clone(),
             key: key.clone(),
         }),

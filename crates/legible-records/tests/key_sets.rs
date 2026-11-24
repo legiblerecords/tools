@@ -235,3 +235,61 @@ fn pins_parse_in_one_place() {
     )
     .is_err());
 }
+
+#[test]
+fn pin_a_key_set_lists_under_another_id_is_unknown() {
+    // One key, one name: a pin whose bytes the held set, or a served set it
+    // doesn't hold, lists under another id doesn't count (feeds.md § Trust).
+    const ALIAS: &str = r#"{"$type":"org.legiblerecords.keys","version":1,"publisher":"acme.example","updated_at":"2026-11-24T00:00:00Z","keys":[
+  {"id":"2026-11-b","alg":"ed25519","public_key":"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg","created_at":"2026-11-24T00:00:00Z"}]}"#;
+    let pinned = || {
+        let mut trust = Trust::default();
+        trust.pins.push(pin(
+            "2026-11",
+            "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+        ));
+        trust
+    };
+    assert!(matches!(
+        pinned().lookup("acme.example", "2026-11"),
+        Lookup::Found(_, KeyState::Active)
+    ));
+    // Held.
+    let mut trust = pinned();
+    trust.key_sets.insert(
+        "acme.example".to_owned(),
+        KeySet::parse(ALIAS.as_bytes()).unwrap(),
+    );
+    assert_eq!(trust.lookup("acme.example", "2026-11"), Lookup::Unknown);
+    // The set's own id still names the key.
+    assert!(matches!(
+        trust.lookup("acme.example", "2026-11-b"),
+        Lookup::Found(_, KeyState::Active)
+    ));
+    // Served on this poll and not held (waiting for approval, say).
+    let mut trust = pinned();
+    trust
+        .revoking
+        .push(KeySet::parse(ALIAS.as_bytes()).unwrap());
+    assert_eq!(trust.lookup("acme.example", "2026-11"), Lookup::Unknown);
+    // An approved key is an anchor like a pin, and is treated the same.
+    let mut trust = Trust::default();
+    trust.approved.push(pin(
+        "2026-11",
+        "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+    ));
+    trust
+        .revoking
+        .push(KeySet::parse(ALIAS.as_bytes()).unwrap());
+    assert_eq!(trust.lookup("acme.example", "2026-11"), Lookup::Unknown);
+    // Another publisher's set listing the same bytes changes nothing.
+    let mut trust = pinned();
+    trust.key_sets.insert(
+        "other.example".to_owned(),
+        KeySet::parse(ALIAS.replace("acme.example", "other.example").as_bytes()).unwrap(),
+    );
+    assert!(matches!(
+        trust.lookup("acme.example", "2026-11"),
+        Lookup::Found(_, KeyState::Active)
+    ));
+}

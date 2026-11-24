@@ -628,7 +628,7 @@ fn signature_status(
 /// The line `bundle verify` prints about the signature, for every outcome.
 fn signature_line(opened: &bundle::Opened, status: &Result<SignatureStatus, Code>) -> String {
     match status {
-        Ok(SignatureStatus::Verified { publisher, key }) => {
+        Ok(SignatureStatus::Verified { publisher, key, .. }) => {
             format!("signature: verified ({publisher} {key})")
         }
         Ok(SignatureStatus::Unverified) => {

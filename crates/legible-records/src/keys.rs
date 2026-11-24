@@ -505,7 +505,8 @@ pub struct Revocation {
     /// The key's id in the set that revokes it.
     pub id: String,
     /// Its public key: a signer recorded under another id with these bytes
-    /// is revoked too.
+    /// is revoked too. A stateless reader's destination matches a revocation
+    /// to the signers it holds by publisher and these bytes, not by id.
     pub public_key: [u8; 32],
     pub revoked_at: String,
     /// Whether the set that revokes it is held (one accepted on this poll
@@ -551,11 +552,32 @@ impl Trust {
             .any(|set| set.revokes(id, bytes))
     }
 
+    /// Whether `id` is pinned or approved for `publisher` and a held or
+    /// revoking set for it lists the public key `bytes` under another id.
+    fn aliased(&self, publisher: &str, id: &str, bytes: &[u8; 32]) -> bool {
+        let anchored = self
+            .pins
+            .iter()
+            .chain(&self.approved)
+            .any(|a| a.publisher == publisher && a.id == id);
+        anchored
+            && self
+                .key_sets
+                .get(publisher)
+                .into_iter()
+                .chain(self.revoking.iter().filter(|s| s.publisher == publisher))
+                .flat_map(|set| &set.keys)
+                .any(|k| k.id != id && &k.public_key == bytes)
+    }
+
     /// The key a publisher's id names, as § Trust defines it: the held set's
     /// entry, a pin and an approved key must agree on its `alg` and bytes,
     /// or the id names no trusted key; a key a held or revoking set revokes,
     /// by id or by its bytes under another id, is `Revoked` even if pinned;
-    /// a key whose `alg` this reader doesn't know is `UnknownAlg`.
+    /// a pinned or approved key whose bytes a held or revoking set lists
+    /// under another id names no trusted key (one key, one name: the pin is
+    /// out of date or wrong); a key whose `alg` this reader doesn't know is
+    /// `UnknownAlg`.
     pub fn lookup(&self, publisher: &str, id: &str) -> Lookup {
         let held = self.key_sets.get(publisher);
         let found = sources(held, &self.anchors(), publisher, id);
@@ -569,6 +591,9 @@ impl Trust {
         };
         if self.revokes(publisher, id, Some(key)) {
             return Lookup::Found(public, KeyState::Revoked);
+        }
+        if self.aliased(publisher, id, key) {
+            return Lookup::Unknown;
         }
         if alg != "ed25519" {
             return Lookup::UnknownAlg;

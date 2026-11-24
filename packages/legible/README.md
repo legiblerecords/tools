@@ -41,7 +41,7 @@ legible bundle verify evidence.signed.zip --pin acme.example/2026-11=<public_key
 legible bundle unpack evidence.signed.zip -d evidence --key-set keys.json
 ```
 
-`bundle verify` prints `signature: verified (<publisher> <key>)`, `signature: unverified` for an unsigned bundle, or `signature: unverified (signed by <publisher> <key>; no trusted keys given)` when a signed bundle is checked with no `--pin` or `--key-set`. A signature that fails prints its code (`unknown_key`, `bad_signature`, `revoked_key`, ...) and exits 1. A malformed `--pin` or a key set that doesn't parse exits 2, naming that file. A pin and a key set that disagree about a key id make it untrusted (`unknown_key`). Exit 0 means a signature was checked only when the line says `verified`.
+`bundle verify` prints `signature: verified (<publisher> <key>)`, `signature: unverified` for an unsigned bundle, or `signature: unverified (signed by <publisher> <key>; no trusted keys given)` when a signed bundle is checked with no `--pin` or `--key-set`. A signature that fails prints its code (`unknown_key`, `bad_signature`, `revoked_key`, ...) and exits 1. A malformed `--pin` or a key set that doesn't parse exits 2, naming that file. A pin and a key set that disagree about a key id make it untrusted (`unknown_key`), and so does a pin whose public key a key set lists under another id (one key has one name: fix the pin). Exit 0 means a signature was checked only when the line says `verified`.
 
 ## Node
 

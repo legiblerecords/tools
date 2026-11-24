@@ -108,8 +108,15 @@ pub struct PackOptions<'a> {
 /// What [`check_signature`] found.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SignatureStatus {
-    /// Signed by a trusted key that is active or retired.
-    Verified { publisher: String, key: String },
+    /// Signed by a trusted key that is active or retired: its publisher, its
+    /// id, and its public key. A key's identity is all three; a destination
+    /// matches a revocation to what it holds by publisher and public key
+    /// (feeds.md § Trust).
+    Verified {
+        publisher: String,
+        key: String,
+        public_key: [u8; 32],
+    },
     /// Not signed, and from no publisher the reader trusts.
     Unverified,
 }
@@ -432,6 +439,7 @@ pub fn check_signed(
     Ok(SignatureStatus::Verified {
         publisher: file.publisher,
         key: file.key,
+        public_key: key.key,
     })
 }
 

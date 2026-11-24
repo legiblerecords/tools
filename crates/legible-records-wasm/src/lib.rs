@@ -371,7 +371,7 @@ impl Bundle {
     pub fn verify_signature(&self, options: JsValue) -> Result<JsValue, JsError> {
         let (trust, expected) = trust_options(options)?;
         match bundle::check_signature(&self.opened, &trust, expected.as_deref()) {
-            Ok(bundle::SignatureStatus::Verified { publisher, key }) => to_js(
+            Ok(bundle::SignatureStatus::Verified { publisher, key, .. }) => to_js(
                 &serde_json::json!({"status": "verified", "publisher": publisher, "key": key}),
             ),
             Ok(bundle::SignatureStatus::Unverified) => {
