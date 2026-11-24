@@ -14,7 +14,8 @@ pub const CONNECTION_TYPE: &str = "org.legiblerecords.feed-connection";
 /// Where a feed's files are.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Location {
-    /// The feed's base URL.
+    /// The feed's base URL, `https://` (or `http://` for a loopback host),
+    /// ending in a slash: a file's URL is this followed by its path.
     Https { url: String },
     /// A prefix in an S3-compatible bucket.
     S3 {
@@ -113,13 +114,22 @@ fn env(object: &Map<String, Value>, place: &str, name: &str, why: &str) -> Resul
     Ok(value)
 }
 
-/// An `http` or `https` URL with a host and no userinfo.
+/// Whether `host` (as written in a URL, without its port) is this machine.
+fn is_loopback(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "[::1]" | "localhost")
+}
+
+/// An `https` URL with a host and no userinfo. Plain `http` is allowed
+/// only for a loopback host (127.0.0.1, [::1], localhost), for local tests.
 fn url(object: &Map<String, Value>, place: &str, name: &str, why: &str) -> Result<String, String> {
     let value = required(object, place, name, why)?;
-    let rest = value
-        .strip_prefix("https://")
-        .or_else(|| value.strip_prefix("http://"))
-        .ok_or_else(|| format!("{place}.{name} must be an https:// URL"))?;
+    let (rest, plain) = match value.strip_prefix("https://") {
+        Some(rest) => (rest, false),
+        None => match value.strip_prefix("http://") {
+            Some(rest) => (rest, true),
+            None => return Err(format!("{place}.{name} must be an https:// URL")),
+        },
+    };
     let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
     if authority.contains('@') {
         // The value isn't echoed: its userinfo is a credential.
@@ -129,6 +139,17 @@ fn url(object: &Map<String, Value>, place: &str, name: &str, why: &str) -> Resul
     }
     if authority.is_empty() {
         return Err(format!("{place}.{name} has no host"));
+    }
+    let host = match authority.strip_prefix('[') {
+        Some(v6) => v6
+            .split_once(']')
+            .map_or(authority, |(h, _)| &authority[..h.len() + 2]),
+        None => authority.split(':').next().unwrap_or_default(),
+    };
+    if plain && !is_loopback(host) {
+        return Err(format!(
+            "{place}.{name} must be an https:// URL (http:// is only for 127.0.0.1, [::1] or localhost)"
+        ));
     }
     Ok(value)
 }
@@ -151,9 +172,18 @@ fn location(value: Option<&Value>) -> Result<Location, String> {
         .ok_or("location is required, as an object")?;
     let kind = required(object, "location", "kind", "")?;
     match kind.as_str() {
-        "https" => Ok(Location::Https {
-            url: url(object, "location", "url", "for kind https")?,
-        }),
+        "https" => {
+            // The base URL ends in a slash, so a reader joins paths onto it
+            // by appending. One without is refused rather than guessed at.
+            let url = url(object, "location", "url", "for kind https")?;
+            if !url.ends_with('/') || url.contains(['?', '#']) {
+                return Err(
+                    "location.url must be the feed's base URL, ending in a slash, with no query or fragment"
+                        .to_owned(),
+                );
+            }
+            Ok(Location::Https { url })
+        }
         "s3" => {
             let why = "for kind s3";
             let path_style = match object.get("path_style") {

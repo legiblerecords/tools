@@ -953,3 +953,214 @@ fn parse_feed_refuses_invalid_indexes() {
     twice["streams"].as_array_mut().unwrap().push(stream);
     assert!(parse_feed(&serde_json::to_vec(&twice).unwrap()).is_err());
 }
+
+// ---- Review fixes. ----
+
+#[test]
+fn served_key_set_makes_unsigned_index_refused_even_before_approval() {
+    let a = key_a();
+    // A storage attacker strips feed.sig and serves far-future watermarks.
+    let mut source = build_feed(
+        "2099-01-01T00:00:00Z",
+        &[Stream {
+            id: "notes",
+            published_at: "2099-01-01T00:00:00Z",
+            signer: None,
+        }],
+        None,
+    );
+    let mut state = ReaderState::default();
+    let before = state.clone();
+    let set = key_set_bytes("2026-11-24T00:00:00Z", &[&a]);
+    let mut keys = FixedKeys(Ok(Some((set, None))), Vec::new());
+    let report = run(&mut source, &mut keys, &conn_with(vec![]), Some(&mut state));
+    assert_eq!(report.pending_keys, vec![pin(&a)]);
+    assert_eq!(
+        report.index,
+        IndexOutcome::Refused(Code::UnsignedFromPinnedPublisher)
+    );
+    assert!(report.streams.is_empty());
+    assert_eq!(state, before);
+}
+
+#[test]
+fn stateless_report_carries_index_even_when_nothing_is_delivered() {
+    let mut source = build_feed(
+        "2026-11-24T12:00:00Z",
+        &[Stream {
+            id: "notes",
+            published_at: "2026-11-24T10:00:00Z",
+            signer: None,
+        }],
+        None,
+    );
+    // The one remaining stream fails, so nothing is delivered.
+    let index = parse_feed(&source.files["feed.json"]).unwrap();
+    source.files.remove(&index.streams[0].bundle);
+    let report = pull(
+        &mut source,
+        &mut NoKeySource,
+        &conn_with(vec![]),
+        None,
+        &mut |_| panic!("nothing is delivered"),
+        &PullOptions::default(),
+    );
+    assert_eq!(report.index, IndexOutcome::Accepted);
+    assert_eq!(
+        report.index_updated_at.as_deref(),
+        Some("2026-11-24T12:00:00Z")
+    );
+    assert_eq!(report.stream_ids, ["notes"]);
+
+    // An index that withdraws everything still reports its date.
+    let mut empty = build_feed("2026-11-24T13:00:00Z", &[], None);
+    let report = run(&mut empty, &mut NoKeySource, &conn_with(vec![]), None);
+    assert_eq!(
+        report.index_updated_at.as_deref(),
+        Some("2026-11-24T13:00:00Z")
+    );
+    assert!(report.stream_ids.is_empty());
+}
+
+#[test]
+fn refused_index_carries_no_index_fields() {
+    let (_, conn, state) = load_case("stale-index");
+    let mut state = state.unwrap();
+    let mut source = DirSource {
+        root: format!("{}/stale-index/feed", vectors_dir()).into(),
+    };
+    let report = pull(
+        &mut source,
+        &mut NoKeySource,
+        &conn,
+        Some(&mut state),
+        &mut |_| Ok(()),
+        &PullOptions::default(),
+    );
+    assert_eq!(report.index_updated_at, None);
+    assert!(report.stream_ids.is_empty());
+}
+
+#[test]
+fn connection_urls_are_https_with_a_slash() {
+    let none = json!({"method": "none"});
+    let refused = [
+        ("http://feeds.acme.example/track/", "https"),
+        ("http://127.0.0.2/track/", "https"),
+        ("https://feeds.acme.example/track", "slash"),
+        ("https://feeds.acme.example/track/?x=1", "slash"),
+    ];
+    for (url, needle) in refused {
+        let err = parse_connection(&connection_json(
+            json!({"kind": "https", "url": url}),
+            none.clone(),
+        ))
+        .expect_err(url);
+        assert!(err.contains(needle), "{url}: {err}");
+    }
+    for url in [
+        "https://feeds.acme.example/track/",
+        "http://127.0.0.1:8080/feed/",
+        "http://localhost/",
+        "http://[::1]:9000/feed/",
+    ] {
+        parse_connection(&connection_json(
+            json!({"kind": "https", "url": url}),
+            none.clone(),
+        ))
+        .unwrap_or_else(|e| panic!("{url}: {e}"));
+    }
+    let err = parse_connection(&connection_json(
+        json!({"kind": "s3", "endpoint": "http://storage.acme.example", "region": "auto",
+               "bucket": "b", "prefix": ""}),
+        json!({"method": "s3", "access_key_id_env": "K", "secret_access_key_env": "S"}),
+    ))
+    .unwrap_err();
+    assert!(err.contains("https"), "{err}");
+}
+
+#[test]
+fn not_modified_echoes_the_etag() {
+    let mut source = build_feed(
+        "2026-11-24T10:00:00Z",
+        &[Stream {
+            id: "notes",
+            published_at: "2026-11-24T10:00:00Z",
+            signer: None,
+        }],
+        None,
+    );
+    source.etag = Some("\"v1\"".to_owned());
+    let options = PullOptions {
+        etag: Some("\"v1\"".to_owned()),
+        ..PullOptions::default()
+    };
+    let report = pull(
+        &mut source,
+        &mut NoKeySource,
+        &conn_with(vec![]),
+        None,
+        &mut |_| panic!("nothing changed"),
+        &options,
+    );
+    assert_eq!(report.index, IndexOutcome::NotModified);
+    assert_eq!(report.etag.as_deref(), Some("\"v1\""));
+}
+
+#[test]
+fn stale_index_with_endorsed_rotation_leaves_whole_state() {
+    let (a, b) = (key_a(), key_b());
+    let mut source = build_feed(
+        "2026-11-24T09:00:00Z",
+        &[Stream {
+            id: "notes",
+            published_at: "2026-11-24T09:00:00Z",
+            signer: Some(&a),
+        }],
+        Some(&a),
+    );
+    let mut state = ReaderState {
+        feed_updated_at: Some("2026-11-24T10:00:00Z".to_owned()),
+        ..ReaderState::default()
+    };
+    state.key_sets.insert(
+        "acme.example".to_owned(),
+        KeySet::parse(&key_set_bytes("2026-11-01T00:00:00Z", &[&a])).unwrap(),
+    );
+    let before = state.clone();
+    let set = key_set_bytes("2026-11-24T00:00:00Z", &[&a, &b]);
+    let sig = sign(&a, Context::Keys, &set).to_bytes();
+    let mut keys = FixedKeys(Ok(Some((set, Some(sig)))), Vec::new());
+    let report = run(&mut source, &mut keys, &conn_with(vec![]), Some(&mut state));
+    assert_eq!(report.index, IndexOutcome::Refused(Code::StaleFeed));
+    assert!(report.fetch_errors.is_empty(), "{:?}", report.fetch_errors);
+    assert_eq!(state, before);
+}
+
+#[test]
+fn partly_approved_key_set_is_not_accepted() {
+    let (a, b) = (key_a(), key_b());
+    let c = SigningKey::from_seed("acme.example", "c", [9; 32]).unwrap();
+    let mut source = build_feed(
+        "2026-11-24T10:00:00Z",
+        &[Stream {
+            id: "notes",
+            published_at: "2026-11-24T10:00:00Z",
+            signer: Some(&a),
+        }],
+        Some(&a),
+    );
+    let mut state = ReaderState::default();
+    state.key_sets.insert(
+        "acme.example".to_owned(),
+        KeySet::parse(&key_set_bytes("2026-11-01T00:00:00Z", &[&a])).unwrap(),
+    );
+    state.approved.push(pin(&b));
+    let held = state.key_sets["acme.example"].clone();
+    let set = key_set_bytes("2026-11-24T00:00:00Z", &[&a, &b, &c]);
+    let mut keys = FixedKeys(Ok(Some((set, None))), Vec::new());
+    let report = run(&mut source, &mut keys, &conn_with(vec![]), Some(&mut state));
+    assert_eq!(report.pending_keys, vec![pin(&c)]);
+    assert_eq!(report.index, IndexOutcome::Accepted);
+    assert_eq!(state.key_sets["acme.example"], held);
+}

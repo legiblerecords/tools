@@ -82,7 +82,18 @@ pub struct PullReport {
     /// The index's ETag, to send next poll. Given only when everything in
     /// this poll was accepted, unchanged or withdrawn, so that a stream that
     /// failed or was refused is tried again rather than skipped as unchanged.
+    ///
+    /// On `NotModified` it is the ETag the poll sent, so a caller that keeps
+    /// `etag` from every report doesn't lose it.
     pub etag: Option<String>,
+    /// The accepted index's `updated_at`; `None` unless the index was
+    /// accepted. A stateless reader's destination needs it even when nothing
+    /// is delivered, to refuse an older index and to mark withdrawn the
+    /// streams a newer one no longer lists.
+    pub index_updated_at: Option<String>,
+    /// Every stream the accepted index lists, in its order; empty unless the
+    /// index was accepted.
+    pub stream_ids: Vec<String>,
 }
 
 /// How to poll.
@@ -107,6 +118,8 @@ impl PullReport {
             pending_keys: Vec::new(),
             fetch_errors: Vec::new(),
             etag: None,
+            index_updated_at: None,
+            stream_ids: Vec::new(),
         }
     }
 
@@ -158,7 +171,8 @@ pub fn pull(
             ))
         }
         (Fetched::NotModified, Fetched::NotFound) | (Fetched::NotFound, Fetched::NotModified) => {
-            return report.index(IndexOutcome::NotModified)
+            report.etag = options.etag.clone();
+            return report.index(IndexOutcome::NotModified);
         }
         (Fetched::Found { bytes, etag }, Fetched::NotFound) => (bytes, etag, false),
         (Fetched::NotFound, Fetched::Found { bytes, etag }) => (bytes, etag, true),
@@ -176,7 +190,13 @@ pub fn pull(
         trust.key_sets = state.key_sets.clone();
         trust.approved = state.approved.clone();
     }
-    let new_key_set = refresh_key_set(keys, &publisher, &mut trust, &mut report);
+    let (new_key_set, serves_key_set) = refresh_key_set(keys, &publisher, &mut trust, &mut report);
+    // A publisher that serves a key set must sign its feed and bundles, so
+    // one whose key set this poll found counts as pinned for the unsigned
+    // rule even before any of its keys is trusted. Otherwise, with no pins
+    // and a key set waiting for approval, whoever holds the storage could
+    // strip feed.sig and get far-future watermarks accepted.
+    let pinned = serves_key_set || trust.trusts_publisher(&publisher);
 
     // 2. The index's signature, over the stored bytes.
     let sig = match source.get("feed.sig", None) {
@@ -189,6 +209,9 @@ pub fn pull(
         }
         Err(e) => return report.index(IndexOutcome::Failed(format!("feed.sig: {e}"))),
     };
+    if sig.is_none() && pinned {
+        return report.index(IndexOutcome::Refused(Code::UnsignedFromPinnedPublisher));
+    }
     if let Err(code) = check_signed(
         sig.as_deref(),
         Context::Feed,
@@ -232,6 +255,8 @@ pub fn pull(
     }
 
     // The index is accepted.
+    report.index_updated_at = Some(index.updated_at.clone());
+    report.stream_ids = index.streams.iter().map(|s| s.id.clone()).collect();
     if let Some(state) = state.as_deref_mut() {
         state.feed_updated_at = Some(index.updated_at.clone());
         if let Some(set) = new_key_set {
@@ -257,7 +282,7 @@ pub fn pull(
     let stream_ids: Vec<String> = index.streams.iter().map(|s| s.id.clone()).collect();
     for entry in &index.streams {
         let held = state.as_deref().and_then(|s| s.streams.get(&entry.id));
-        let outcome = match check_stream(source, entry, held, &index, &trust, options) {
+        let outcome = match check_stream(source, entry, held, &index, &trust, pinned, options) {
             Err(outcome) => outcome,
             Ok((bundle, signature, published_at)) => {
                 let delivered = Delivered {
@@ -306,13 +331,14 @@ pub fn pull(
 /// held one in `trust`, and is returned for the state to keep once the
 /// index is accepted. Anything else keeps the held set: a set that adds
 /// keys nobody endorsed or approved puts them in `pending_keys`, and a
-/// fetch error or a refused set goes in `fetch_errors`.
+/// fetch error or a refused set goes in `fetch_errors`. The flag says
+/// whether a key set that parses was served at all.
 fn refresh_key_set(
     keys: &mut dyn KeySource,
     publisher: &str,
     trust: &mut Trust,
     report: &mut PullReport,
-) -> Option<KeySet> {
+) -> (Option<KeySet>, bool) {
     let error = |report: &mut PullReport, e: String| {
         report
             .fetch_errors
@@ -320,29 +346,29 @@ fn refresh_key_set(
     };
     let (bytes, sig) = match keys.key_set(publisher) {
         Ok(Some(fetched)) => fetched,
-        Ok(None) => return None,
+        Ok(None) => return (None, false),
         Err(e) => {
             error(report, e);
-            return None;
+            return (None, false);
         }
     };
     let set = match KeySet::parse(&bytes) {
         Ok(set) => set,
         Err(code) => {
             error(report, code.to_string());
-            return None;
+            return (None, false);
         }
     };
     if set.publisher != publisher {
         error(report, format!("it is {}'s key set", set.publisher));
-        return None;
+        return (None, true);
     }
     let held = trust.key_sets.get(publisher);
     let pins: Vec<Pin> = trust.pins.iter().chain(&trust.approved).cloned().collect();
     match accept_key_set(held, &pins, &set, sig.as_deref()) {
         Err(code) => {
             error(report, code.to_string());
-            return None;
+            return (None, true);
         }
         Ok(KeySetDecision::Accepted) => {}
         Ok(KeySetDecision::NeedsApproval) => {
@@ -372,7 +398,7 @@ fn refresh_key_set(
                         unknown.id, unknown.alg
                     ),
                 );
-                return None;
+                return (None, true);
             }
             let pending: Vec<Pin> = added
                 .iter()
@@ -385,12 +411,12 @@ fn refresh_key_set(
                 .collect();
             if !pending.is_empty() {
                 report.pending_keys.extend(pending);
-                return None;
+                return (None, true);
             }
         }
     }
     trust.key_sets.insert(publisher.to_owned(), set.clone());
-    Some(set)
+    (Some(set), true)
 }
 
 /// Steps 6 and 8–10 for one stream: the bundle, its signature and its
@@ -401,6 +427,7 @@ fn check_stream(
     held: Option<&StreamState>,
     index: &Feed,
     trust: &Trust,
+    pinned: bool,
     options: &PullOptions,
 ) -> Result<(Opened, SignatureStatus, String), StreamOutcome> {
     // 6. Unchanged.
@@ -426,6 +453,9 @@ fn check_stream(
     let Ok(bundle) = open(&bytes, options.limits) else {
         return refused(Code::BadBundle);
     };
+    if bundle.signature.is_none() && pinned {
+        return refused(Code::UnsignedFromPinnedPublisher);
+    }
     let signature = match check_signature(&bundle, trust, Some(&index.publisher)) {
         Ok(status) => status,
         Err(code) => return refused(code),
