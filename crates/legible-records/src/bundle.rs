@@ -634,7 +634,7 @@ pub fn verify(bundle: &Opened, schemas: &[Value]) -> Report {
                         .and_then(|rest| rest.strip_suffix(".json"))
                         .and_then(|rest| rest.split_once('/'))
                         .is_some_and(|(found, key)| {
-                            is_key(key) && folder.as_deref().map_or(true, |f| f == found)
+                            is_key(key) && folder.as_deref().is_none_or(|f| f == found)
                         });
                     if !placed {
                         let folder = folder.unwrap_or_else(|| "<kind>".to_owned());
