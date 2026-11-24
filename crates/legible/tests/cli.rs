@@ -989,3 +989,553 @@ mod feed_publish {
         );
     }
 }
+
+// ---- legible feed check | pull ----
+
+mod feed_read {
+    use super::*;
+    use legible_records::feed::ReaderState;
+    use std::sync::Arc;
+
+    const FEED: &str = "acme.example/track";
+    const TOKEN: &str = "s3cret-test-token";
+
+    /// A feed served over HTTP on 127.0.0.1 from a directory, behind a bearer token, with
+    /// the publisher's key set at `/.well-known/legible-records/` from another.
+    struct Server {
+        server: Arc<tiny_http::Server>,
+        port: u16,
+        /// Requests seen for `feed.json`, with their `If-None-Match`.
+        index_requests: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    }
+
+    impl Drop for Server {
+        fn drop(&mut self) {
+            self.server.unblock();
+        }
+    }
+
+    fn serve(feed_dir: PathBuf, keys_dir: PathBuf, etags: bool) -> Server {
+        let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").unwrap());
+        let port = server.server_addr().to_ip().unwrap().port();
+        let index_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (thread_server, log) = (Arc::clone(&server), Arc::clone(&index_requests));
+        std::thread::spawn(move || {
+            for request in thread_server.incoming_requests() {
+                let url = request.url().to_owned();
+                let headers: Vec<(String, String)> = request
+                    .headers()
+                    .iter()
+                    .map(|h| {
+                        (
+                            h.field.as_str().as_str().to_lowercase(),
+                            h.value.to_string(),
+                        )
+                    })
+                    .collect();
+                let header = |name: &str| {
+                    headers
+                        .iter()
+                        .find(|(k, _)| k == name)
+                        .map(|(_, v)| v.clone())
+                };
+                let (file, authorized) =
+                    if let Some(name) = url.strip_prefix("/.well-known/legible-records/") {
+                        (keys_dir.join(name), true)
+                    } else if let Some(path) = url.strip_prefix("/track/") {
+                        (
+                            feed_dir.join(path),
+                            header("authorization").as_deref() == Some(&format!("Bearer {TOKEN}")),
+                        )
+                    } else {
+                        (PathBuf::from("/nonexistent/x"), true)
+                    };
+                if url == "/track/feed.json" {
+                    log.lock().unwrap().push(header("if-none-match"));
+                }
+                let respond = |status: u16, body: Vec<u8>, etag: Option<String>| {
+                    let mut response = tiny_http::Response::from_data(body)
+                        .with_status_code(tiny_http::StatusCode(status));
+                    if let Some(etag) = etag {
+                        response.add_header(
+                            tiny_http::Header::from_bytes(&b"ETag"[..], etag.as_bytes()).unwrap(),
+                        );
+                    }
+                    let _ = request.respond(response);
+                };
+                if !authorized {
+                    respond(401, Vec::new(), None);
+                } else if let Ok(bytes) = std::fs::read(&file) {
+                    let etag = (etags && url == "/track/feed.json")
+                        .then(|| format!("\"{}\"", legible_records::bundle::sha256_hex(&bytes)));
+                    if etag.is_some() && header("if-none-match") == etag {
+                        respond(304, Vec::new(), etag);
+                    } else {
+                        respond(200, bytes, etag);
+                    }
+                } else {
+                    respond(404, Vec::new(), None);
+                }
+            }
+        });
+        Server {
+            server,
+            port,
+            index_requests,
+        }
+    }
+
+    struct Setup {
+        temp: Temp,
+        feed_dir: PathBuf,
+        keys_dir: PathBuf,
+        entry: serde_json::Value,
+        key: PathBuf,
+    }
+
+    impl Setup {
+        fn state_file(&self) -> PathBuf {
+            self.temp.path("state/acme.example__track.json")
+        }
+        fn state(&self) -> ReaderState {
+            ReaderState::parse(&std::fs::read(self.state_file()).unwrap()).unwrap()
+        }
+    }
+
+    /// A signed feed with the streams given, published by the CLI, and its keys.
+    fn setup(name: &str, streams: &[&str]) -> Setup {
+        let temp = Temp::new(name);
+        let entry = keys_new(&temp, "key.json", "acme.example", "2026-11");
+        let feed_dir = temp.path("feed");
+        let keys_dir = temp.path("wellknown");
+        std::fs::create_dir_all(&keys_dir).unwrap();
+        let set = serde_json::json!({
+            "$type": "org.legiblerecords.keys",
+            "version": 1,
+            "publisher": "acme.example",
+            "updated_at": "2026-11-24T00:00:00Z",
+            "keys": [entry],
+        });
+        std::fs::write(
+            keys_dir.join("keys.json"),
+            serde_json::to_vec(&set).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path("ack.json"),
+            br#"{"$type":"tech.monorail.policy.acknowledgment","version":1,"id":"ack-1","title":"Acknowledged"}"#,
+        )
+        .unwrap();
+        let key = temp.path("key.json");
+        let s = Setup {
+            temp,
+            feed_dir,
+            keys_dir,
+            entry,
+            key,
+        };
+        for stream in streams {
+            let record = s.temp.path("ack.json");
+            let published = legible(&[
+                arg("feed"),
+                arg("publish"),
+                &s.feed_dir,
+                arg("--feed"),
+                arg(FEED),
+                arg("--audience"),
+                arg("Monorail, for Track"),
+                arg("--stream"),
+                arg(stream),
+                arg("--title"),
+                arg("Acknowledgments"),
+                arg("-k"),
+                &s.key,
+                &record,
+            ]);
+            assert!(published.status.success(), "{published:?}");
+        }
+        s
+    }
+
+    fn public_key(s: &Setup) -> String {
+        s.entry["public_key"].as_str().unwrap().to_owned()
+    }
+
+    /// A connection file for `server`; `pinned` puts the publisher's key in it.
+    fn write_connection(s: &Setup, port: u16, pinned: bool) -> PathBuf {
+        write_connection_pinning(s, port, pinned.then(|| public_key(s)))
+    }
+
+    fn write_connection_pinning(s: &Setup, port: u16, pin: Option<String>) -> PathBuf {
+        let keys = if let Some(public_key) = pin {
+            serde_json::json!([{
+                "publisher": "acme.example", "id": "2026-11", "alg": "ed25519",
+                "public_key": public_key,
+            }])
+        } else {
+            serde_json::json!([])
+        };
+        let connection = serde_json::json!({
+            "$type": "org.legiblerecords.feed-connection",
+            "version": 1,
+            "feed": FEED,
+            "location": {"kind": "https", "url": format!("http://127.0.0.1:{port}/track/")},
+            "auth": {"method": "bearer", "token_env": "TRACK_FEED_TOKEN"},
+            "keys": keys,
+        });
+        let path = s.temp.path("connection.json");
+        std::fs::write(&path, serde_json::to_vec(&connection).unwrap()).unwrap();
+        path
+    }
+
+    /// `legible feed <sub> ...` with the token in its environment and the key
+    /// sets read from `origin`.
+    fn run(sub: &str, args: &[&Path], origin: Option<u16>) -> Output {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_legible"));
+        command.arg("feed").arg(sub).args(args);
+        command.env("TRACK_FEED_TOKEN", TOKEN);
+        if let Some(port) = origin {
+            command
+                .arg("--key-origin")
+                .arg(format!("http://127.0.0.1:{port}"));
+        }
+        command.output().unwrap()
+    }
+
+    fn pull_args<'a>(
+        s: &'a Setup,
+        connection: &'a Path,
+        state: &'a Path,
+        out: &'a Path,
+    ) -> Vec<&'a Path> {
+        let _ = s;
+        vec![connection, arg("--state"), state, arg("--out"), out]
+    }
+
+    fn text(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+
+    fn out_files(out: &Path) -> Vec<String> {
+        let mut found = Vec::new();
+        if let Ok(streams) = std::fs::read_dir(out) {
+            for stream in streams {
+                let stream = stream.unwrap();
+                for file in std::fs::read_dir(stream.path()).unwrap() {
+                    found.push(format!(
+                        "{}/{}",
+                        stream.file_name().to_string_lossy(),
+                        file.unwrap().file_name().to_string_lossy()
+                    ));
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn check_prints_each_stream() {
+        let s = setup("t9-check", &["alpha", "beta"]);
+        let server = serve(s.feed_dir.clone(), s.keys_dir.clone(), false);
+        let connection = write_connection(&s, server.port, true);
+        let result = run("check", &[&connection], Some(server.port));
+        assert_eq!(result.status.code(), Some(0), "{result:?}");
+        let out = text(&result.stdout);
+        assert!(
+            out.contains("alpha: accepted (verified acme.example 2026-11)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("beta: accepted (verified acme.example 2026-11)"),
+            "{out}"
+        );
+        // Stateless, and it delivers nothing: only the files it was given exist.
+        assert!(!s.state_file().exists());
+        assert!(!s.temp.path("state").exists());
+    }
+
+    #[test]
+    fn check_reports_a_refusal_and_exits_1() {
+        let s = setup("t9-check-refused", &["alpha"]);
+        let server = serve(s.feed_dir.clone(), s.keys_dir.clone(), false);
+        // Another key under the same id: the signature doesn't verify.
+        let other = keys_new(&s.temp, "other.json", "acme.example", "2026-11");
+        let wrong = other["public_key"].as_str().unwrap().to_owned();
+        let connection = write_connection_pinning(&s, server.port, Some(wrong));
+        let result = run("check", &[&connection], Some(server.port));
+        assert_eq!(result.status.code(), Some(1), "{result:?}");
+        // The index is signed by the key that isn't the pinned one.
+        assert!(
+            text(&result.stdout).contains("index: bad_signature"),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn a_refused_stream_is_named_and_exits_1() {
+        let s = setup("t9-stream-refused", &["alpha"]);
+        let server = serve(s.feed_dir.clone(), s.keys_dir.clone(), false);
+        let connection = write_connection(&s, server.port, true);
+        for entry in std::fs::read_dir(s.feed_dir.join("bundles")).unwrap() {
+            std::fs::write(entry.unwrap().path(), b"not the bundle").unwrap();
+        }
+        let (state, out) = (s.temp.path("state"), s.temp.path("out"));
+        let result = run(
+            "pull",
+            &pull_args(&s, &connection, &state, &out),
+            Some(server.port),
+        );
+        assert_eq!(result.status.code(), Some(1), "{result:?}");
+        assert!(
+            text(&result.stdout).contains("alpha: download_mismatch"),
+            "{result:?}"
+        );
+        assert!(out_files(&out).is_empty());
+        // Tried again next poll: the stream isn't recorded as held.
+        assert!(s.state().streams.is_empty());
+    }
+
+    #[test]
+    fn pull_writes_bundles_and_state() {
+        let s = setup("t9-pull", &["alpha", "beta"]);
+        let server = serve(s.feed_dir.clone(), s.keys_dir.clone(), false);
+        let connection = write_connection(&s, server.port, true);
+        let (state, out) = (s.temp.path("state"), s.temp.path("out"));
+        let result = run(
+            "pull",
+            &pull_args(&s, &connection, &state, &out),
+            Some(server.port),
+        );
+        assert_eq!(result.status.code(), Some(0), "{result:?}");
+        let said = text(&result.stdout);
+        assert!(
+            said.contains("alpha: accepted (verified acme.example 2026-11)"),
+            "{said}"
+        );
+
+        // One zip per stream, named by published_at with ':' as '-'.
+        let held = s.state();
+        let files = out_files(&out);
+        assert_eq!(files.len(), 2, "{files:?}");
+        for id in ["alpha", "beta"] {
+            let published = &held.streams[id].published_at;
+            let name = format!("{id}/{}.zip", published.replace(':', "-"));
+            assert!(files.contains(&name), "{name} in {files:?}");
+            // Decrypted and whole: the CLI verifies it, signature included.
+            let verified = legible(&[
+                arg("bundle"),
+                arg("verify"),
+                &out.join(&name),
+                arg("--pin"),
+                arg(&format!("acme.example/2026-11={}", public_key(&s))),
+            ]);
+            assert!(verified.status.success(), "{verified:?}");
+            assert!(
+                text(&verified.stdout).contains("signature: verified"),
+                "{verified:?}"
+            );
+        }
+        assert!(held.feed_updated_at.is_some());
+    }
+
+    #[test]
+    fn second_pull_is_unchanged() {
+        let s = setup("t9-second", &["alpha"]);
+        let server = serve(s.feed_dir.clone(), s.keys_dir.clone(), false);
+        let connection = write_connection(&s, server.port, true);
+        let (state, out) = (s.temp.path("state"), s.temp.path("out"));
+        let args = pull_args(&s, &connection, &state, &out);
+        assert!(run("pull", &args, Some(server.port)).status.success());
+        let (state_before, files_before) =
+            (std::fs::read(s.state_file()).unwrap(), out_files(&out));
+
+        let again = run("pull", &args, Some(server.port));
+        assert_eq!(again.status.code(), Some(0), "{again:?}");
+        assert!(
+            text(&again.stdout).contains("alpha: unchanged"),
+            "{again:?}"
+        );
+        assert_eq!(std::fs::read(s.state_file()).unwrap(), state_before);
+        assert_eq!(out_files(&out), files_before);
+    }
+
+    #[test]
+    fn etag_is_kept_in_state_and_sent() {
+        let s = setup("t9-etag", &["alpha"]);
+        let server = serve(s.feed_dir.clone(), s.keys_dir.clone(), true);
+        let connection = write_connection(&s, server.port, true);
+        let (state, out) = (s.temp.path("state"), s.temp.path("out"));
+        let args = pull_args(&s, &connection, &state, &out);
+        assert!(run("pull", &args, Some(server.port)).status.success());
+        let kept: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(s.state_file()).unwrap()).unwrap();
+        let etag = kept["etag"]
+            .as_str()
+            .expect("the ETag is in the state file");
+        assert!(etag.starts_with('"'), "{etag}");
+        // Still a state file a reader of the state alone can read.
+        assert!(s.state().streams.contains_key("alpha"));
+
+        let before = std::fs::read(s.state_file()).unwrap();
+        let again = run("pull", &args, Some(server.port));
+        assert_eq!(again.status.code(), Some(0), "{again:?}");
+        assert!(text(&again.stdout).contains("not modified"), "{again:?}");
+        let sent = server.index_requests.lock().unwrap().clone();
+        assert_eq!(sent.last().unwrap().as_deref(), Some(etag), "{sent:?}");
+        assert_eq!(std::fs::read(s.state_file()).unwrap(), before);
+    }
+
+    #[test]
+    fn pending_key_exit_1_prints_approve_arg() {
+        let s = setup("t9-pending", &["alpha"]);
+        let server = serve(s.feed_dir.clone(), s.keys_dir.clone(), false);
+        let connection = write_connection(&s, server.port, false);
+        let (state, out) = (s.temp.path("state"), s.temp.path("out"));
+        let result = run(
+            "pull",
+            &pull_args(&s, &connection, &state, &out),
+            Some(server.port),
+        );
+        assert_eq!(result.status.code(), Some(1), "{result:?}");
+        let line = format!(
+            "pending key: --approve acme.example/2026-11={}",
+            public_key(&s)
+        );
+        assert!(text(&result.stdout).contains(&line), "{result:?}");
+        assert!(out_files(&out).is_empty());
+    }
+
+    #[test]
+    fn approve_then_pull_accepts() {
+        let s = setup("t9-approve", &["alpha"]);
+        let server = serve(s.feed_dir.clone(), s.keys_dir.clone(), false);
+        let connection = write_connection(&s, server.port, false);
+        let (state, out) = (s.temp.path("state"), s.temp.path("out"));
+        let first = run(
+            "pull",
+            &pull_args(&s, &connection, &state, &out),
+            Some(server.port),
+        );
+        assert_eq!(first.status.code(), Some(1), "{first:?}");
+        let said = text(&first.stdout);
+        let approve = said
+            .lines()
+            .find_map(|l| l.strip_prefix("pending key: --approve "))
+            .expect("an --approve argument is printed")
+            .to_owned();
+
+        let mut args = pull_args(&s, &connection, &state, &out);
+        args.extend([arg("--approve"), arg(&approve)]);
+        let second = run("pull", &args, Some(server.port));
+        assert_eq!(second.status.code(), Some(0), "{second:?}");
+        assert!(
+            text(&second.stdout).contains("alpha: accepted (verified acme.example 2026-11)"),
+            "{second:?}"
+        );
+        let held = s.state();
+        assert_eq!(held.approved.len(), 1);
+        assert_eq!(out_files(&out).len(), 1);
+
+        // Kept: the next pull needs no --approve.
+        let third = run(
+            "pull",
+            &pull_args(&s, &connection, &state, &out),
+            Some(server.port),
+        );
+        assert_eq!(third.status.code(), Some(0), "{third:?}");
+        assert!(
+            text(&third.stdout).contains("alpha: unchanged"),
+            "{third:?}"
+        );
+    }
+
+    #[test]
+    fn malformed_approve_is_exit_2() {
+        let s = setup("t9-badapprove", &["alpha"]);
+        let server = serve(s.feed_dir.clone(), s.keys_dir.clone(), false);
+        let connection = write_connection(&s, server.port, true);
+        let (state, out) = (s.temp.path("state"), s.temp.path("out"));
+        let mut args = pull_args(&s, &connection, &state, &out);
+        args.extend([arg("--approve"), arg("acme.example/2026-11")]);
+        let result = run("pull", &args, Some(server.port));
+        assert_eq!(result.status.code(), Some(2), "{result:?}");
+        assert!(!s.state_file().exists());
+    }
+
+    #[test]
+    fn unreachable_source_exit_2() {
+        let s = setup("t9-down", &["alpha"]);
+        // Nothing listens on the port a closed server held.
+        let port = {
+            let gone = tiny_http::Server::http("127.0.0.1:0").unwrap();
+            gone.server_addr().to_ip().unwrap().port()
+        };
+        let connection = write_connection(&s, port, true);
+        let (state, out) = (s.temp.path("state"), s.temp.path("out"));
+        let result = run(
+            "pull",
+            &pull_args(&s, &connection, &state, &out),
+            Some(port),
+        );
+        assert_eq!(result.status.code(), Some(2), "{result:?}");
+        assert!(!s.state_file().exists(), "a failed index leaves no state");
+        let checked = run("check", &[&connection], Some(port));
+        assert_eq!(checked.status.code(), Some(2), "{checked:?}");
+    }
+
+    #[test]
+    fn missing_connection_file_is_exit_2() {
+        let temp = Temp::new("t9-noconn");
+        let missing = temp.path("nope.json");
+        let result = run("check", &[&missing], None);
+        assert_eq!(result.status.code(), Some(2), "{result:?}");
+    }
+
+    #[test]
+    fn refused_index_leaves_state_untouched() {
+        let s = setup("t9-refused", &["alpha"]);
+        let server = serve(s.feed_dir.clone(), s.keys_dir.clone(), false);
+        let connection = write_connection(&s, server.port, true);
+        let (state, out) = (s.temp.path("state"), s.temp.path("out"));
+        let args = pull_args(&s, &connection, &state, &out);
+        assert!(run("pull", &args, Some(server.port)).status.success());
+        let before = std::fs::read(s.state_file()).unwrap();
+
+        std::fs::write(s.feed_dir.join("feed.sig"), b"not a signature").unwrap();
+        let result = run("pull", &args, Some(server.port));
+        assert_eq!(result.status.code(), Some(1), "{result:?}");
+        assert!(
+            text(&result.stdout).contains("index: bad_signature_file"),
+            "{result:?}"
+        );
+        assert_eq!(std::fs::read(s.state_file()).unwrap(), before);
+    }
+
+    #[test]
+    fn state_dir_write_is_atomic() {
+        let s = setup("t9-atomic", &["alpha"]);
+        let server = serve(s.feed_dir.clone(), s.keys_dir.clone(), false);
+        let connection = write_connection(&s, server.port, true);
+        let (state, out) = (s.temp.path("state"), s.temp.path("out"));
+        let args = pull_args(&s, &connection, &state, &out);
+        for _ in 0..2 {
+            assert!(run("pull", &args, Some(server.port)).status.success());
+        }
+        let names: Vec<String> = std::fs::read_dir(&state)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            ["acme.example__track.json"],
+            "no temp file is left behind"
+        );
+        for stream in std::fs::read_dir(&out).unwrap() {
+            for file in std::fs::read_dir(stream.unwrap().path()).unwrap() {
+                let name = file.unwrap().file_name().into_string().unwrap();
+                assert!(name.ends_with(".zip") && !name.contains(".tmp"), "{name}");
+            }
+        }
+    }
+}

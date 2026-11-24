@@ -353,6 +353,19 @@ fn write_zip(
         .into_inner())
 }
 
+/// An opened bundle written back as a zip: its manifest and signature as
+/// stored, so a signature still covers the same bytes, and its files, in the
+/// order and form [`pack`] writes them. For a reader that holds a bundle
+/// only opened, such as the one `pull` delivers.
+pub fn to_zip(bundle: &Opened) -> Result<Vec<u8>, Vec<String>> {
+    let files: BTreeMap<&str, &[u8]> = bundle
+        .files
+        .iter()
+        .map(|(path, bytes)| (path.as_str(), bytes.as_slice()))
+        .collect();
+    write_zip(&bundle.manifest_bytes, &files, bundle.signature.as_deref())
+}
+
 /// Adds `manifest.sig` to a bundle's zip, signing its manifest as stored.
 /// Everything else is written as [`pack`] writes it. A bundle that already
 /// has a signature is refused: sign the bundle once, or pack it again.
@@ -734,6 +747,20 @@ mod tests {
             name: "mfa.json".to_owned(),
             bytes: br#"{"$type":"tech.monorail.controls.control","version":1,"id":"mfa","title":"MFA"}"#.to_vec(),
         }
+    }
+
+    #[test]
+    fn to_zip_is_the_bundle_packed_again() {
+        let key = SigningKey::from_seed("acme.example", "2026-11", [7; 32]).unwrap();
+        let options = PackOptions {
+            published_at: Some("2026-11-24T10:00:00Z".to_owned()),
+            signer: Some(&key),
+            ..PackOptions::default()
+        };
+        let packed = pack_with(&[control()], &[], &options).unwrap();
+        let opened = open(&packed.zip, Limits::default()).unwrap();
+        // Same entries, same order, so the same bytes: the signature still covers them.
+        assert_eq!(to_zip(&opened).unwrap(), packed.zip);
     }
 
     fn statement(reference: &str, evidence_sha: &str) -> Input {

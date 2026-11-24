@@ -1367,6 +1367,7 @@ dependencies = [
  "clap",
  "legible-records",
  "serde_json",
+ "tiny_http",
  "zeroize",
  "zip",
 ]

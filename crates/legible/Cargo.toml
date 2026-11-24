@@ -20,3 +20,4 @@ zeroize.workspace = true
 [dev-dependencies]
 zip.workspace = true
 age = "0.11"
+tiny_http = "0.12"

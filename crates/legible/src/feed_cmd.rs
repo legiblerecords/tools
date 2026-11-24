@@ -13,11 +13,14 @@ use std::time::Duration;
 
 use clap::{Args, Subcommand};
 use legible_records::bundle::{self, Input, PackOptions};
+use legible_records::bundle::{Limits, SignatureStatus};
 use legible_records::feed::index::{is_feed_id, is_sha256, is_slug};
 use legible_records::feed::{
-    check_bundle_paths, collectable, next_published_at, parse_feed, render_feed, Feed,
-    PublishState, StreamEntry, MAX_INDEX_BYTES,
+    check_bundle_paths, collectable, next_published_at, parse_connection, parse_feed, pull,
+    render_feed, Connection, Feed, IndexOutcome, KeySource, PublishState, PullOptions, PullReport,
+    ReaderState, StreamEntry, StreamOutcome, MAX_INDEX_BYTES,
 };
+use legible_records::net::{source_with_limits, HttpsKeySource};
 use legible_records::sign::{self, is_publisher, Context, SigningKey};
 use legible_records::time::{self, Instant};
 use serde_json::Value;
@@ -31,6 +34,40 @@ pub enum FeedCommand {
     /// feed.sig. A feed is plain, or encrypted when -r is given, never both. Never deploys:
     /// it writes only the directory given.
     Publish(PublishArgs),
+    /// Poll a feed from a connection file and report each stream's outcome, without keeping
+    /// anything: nothing is written or delivered. Exit 0 when everything is accepted, 1 when
+    /// anything is refused or a key waits for approval, 2 when the feed couldn't be reached.
+    Check(ReadArgs),
+    /// Poll a feed from a connection file, write each accepted bundle (decrypted) to
+    /// <out>/<stream>/<published_at>.zip, and keep what the reader remembers in --state.
+    Pull(PullArgs),
+}
+
+#[derive(Args)]
+pub struct ReadArgs {
+    /// The connection file.
+    connection: PathBuf,
+    /// Read publishers' key sets from this origin instead of their own domains (for tests).
+    #[arg(long, hide = true, value_name = "ORIGIN")]
+    key_origin: Option<String>,
+}
+
+#[derive(Args)]
+pub struct PullArgs {
+    /// The connection file.
+    connection: PathBuf,
+    /// The directory for the reader's state: <feed id with / as __>.json in it.
+    #[arg(long)]
+    state: PathBuf,
+    /// The directory accepted bundles are written to, as <stream>/<published_at>.zip.
+    #[arg(long)]
+    out: PathBuf,
+    /// Approve a key a key set adds without an endorsement, as the pull printed it:
+    /// <publisher>/<id>=<public_key>. Kept in the state; repeat for several.
+    #[arg(long, value_name = "PUBLISHER/ID=PUBLIC_KEY")]
+    approve: Vec<String>,
+    #[arg(long, hide = true, value_name = "ORIGIN")]
+    key_origin: Option<String>,
 }
 
 #[derive(Args)]
@@ -94,6 +131,8 @@ struct Existing {
 pub fn run(command: FeedCommand) -> Result<(), Stop> {
     match command {
         FeedCommand::Publish(args) => publish(args),
+        FeedCommand::Check(args) => check(args),
+        FeedCommand::Pull(args) => pull_feed(args),
     }
 }
 
@@ -114,7 +153,12 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), Stop> {
         .ok_or_else(|| Stop::Failed(format!("{}: not a file path", path.display())))?;
     let temp = path.with_file_name(format!(".{name}.tmp-{}", std::process::id()));
     let result = (|| {
-        let mut file = std::fs::File::create(&temp)?;
+        // A leftover from a run that died, under this same process id.
+        let _ = std::fs::remove_file(&temp);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
         std::io::Write::write_all(&mut file, bytes)?;
         file.sync_all()?;
         drop(file);
@@ -490,4 +534,270 @@ fn collect_garbage(
         state.unreferenced_since.remove(&path);
     }
     write_atomic(state_path, &state.to_bytes())
+}
+
+// ---- feed check | pull ----
+
+/// A connection file, read and parsed.
+fn read_connection(path: &Path) -> Result<Connection, Stop> {
+    let bytes = crate::read_input(path)?;
+    parse_connection(&bytes).map_err(|e| Stop::Failed(format!("{}: {e}", path.display())))
+}
+
+fn key_source(origin: Option<&str>) -> Result<Box<dyn KeySource>, Stop> {
+    Ok(match origin {
+        None => Box::new(HttpsKeySource::new()),
+        Some(origin) => Box::new(
+            HttpsKeySource::with_base(origin)
+                .map_err(|e| Stop::Failed(format!("--key-origin: {e}")))?,
+        ),
+    })
+}
+
+/// The age identity the connection names, if the variable is set.
+fn identity(conn: &Connection) -> Option<zeroize::Zeroizing<String>> {
+    let name = conn.age_identity_env.as_deref()?;
+    std::env::var(name).ok().map(zeroize::Zeroizing::new)
+}
+
+/// One poll, reading secrets from the environment the connection names.
+fn poll(
+    conn: &Connection,
+    key_origin: Option<&str>,
+    state: Option<&mut ReaderState>,
+    etag: Option<String>,
+    deliver: &mut dyn FnMut(legible_records::feed::Delivered) -> Result<(), String>,
+) -> Result<PullReport, Stop> {
+    let limits = Limits::default();
+    let mut source = source_with_limits(conn, &|name| std::env::var(name).ok(), &limits)
+        .map_err(Stop::Failed)?;
+    let mut keys = key_source(key_origin)?;
+    let identity = identity(conn);
+    let options = PullOptions {
+        identity: identity.as_ref().map(|i| i.as_str()),
+        etag,
+        limits,
+    };
+    Ok(pull(
+        source.as_mut(),
+        keys.as_mut(),
+        conn,
+        state,
+        deliver,
+        &options,
+    ))
+}
+
+/// Prints what a poll found, and says whether it found anything to act on
+/// (exit 1). A feed that couldn't be read at all is exit 2.
+fn report_poll(
+    report: &PullReport,
+    signatures: &std::collections::BTreeMap<String, SignatureStatus>,
+) -> Result<(), Stop> {
+    for error in &report.fetch_errors {
+        eprintln!("{error}");
+    }
+    let mut problems = false;
+    match &report.index {
+        IndexOutcome::Failed(e) => return fail(format!("index: failed: {e}")),
+        IndexOutcome::Refused(code) => {
+            println!("index: {}", code.as_str());
+            problems = true;
+        }
+        IndexOutcome::NotModified => println!("index: not modified"),
+        IndexOutcome::Accepted => {}
+    }
+    for (id, outcome) in &report.streams {
+        match outcome {
+            StreamOutcome::Accepted => match signatures.get(id) {
+                Some(SignatureStatus::Verified { publisher, key }) => {
+                    println!("{id}: accepted (verified {publisher} {key})")
+                }
+                _ => println!("{id}: accepted (unverified)"),
+            },
+            StreamOutcome::Unchanged => println!("{id}: unchanged"),
+            StreamOutcome::Withdrawn => println!("{id}: withdrawn"),
+            StreamOutcome::Refused(code) => {
+                println!("{id}: {}", code.as_str());
+                problems = true;
+            }
+            StreamOutcome::Failed(e) => {
+                println!("{id}: failed: {e}");
+                problems = true;
+            }
+        }
+    }
+    for pin in &report.pending_keys {
+        println!(
+            "pending key: --approve {}/{}={}",
+            pin.publisher,
+            pin.id,
+            legible_records::sign::b64url(&pin.public_key)
+        );
+        problems = true;
+    }
+    if problems {
+        Err(Stop::Problems)
+    } else {
+        Ok(())
+    }
+}
+
+fn check(args: ReadArgs) -> Result<(), Stop> {
+    let conn = read_connection(&args.connection)?;
+    let mut signatures = std::collections::BTreeMap::new();
+    let report = poll(&conn, args.key_origin.as_deref(), None, None, &mut |d| {
+        signatures.insert(d.stream.id.clone(), d.signature);
+        Ok(())
+    })?;
+    report_poll(&report, &signatures)
+}
+
+/// The state file's bytes: the reader state, and beside it the index's ETag
+/// from the last poll that settled, so the next poll can ask `If-None-Match`.
+fn render_state(state: &ReaderState, etag: Option<&str>) -> Vec<u8> {
+    let mut value: Value = serde_json::from_slice(&state.to_bytes()).expect("state is JSON");
+    if let (Some(etag), Some(object)) = (etag, value.as_object_mut()) {
+        object.insert("etag".to_owned(), Value::from(etag));
+    }
+    bundle::canonical_record(&value)
+}
+
+/// What a state file held.
+struct Held {
+    state: ReaderState,
+    etag: Option<String>,
+    /// The file's bytes, if there was a file.
+    bytes: Option<Vec<u8>>,
+}
+
+/// The state and ETag in a state file, or empty ones if there is no file.
+fn load_state(path: &Path) -> Result<Held, Stop> {
+    let Some(bytes) = read_optional(path)? else {
+        return Ok(Held {
+            state: ReaderState::default(),
+            etag: None,
+            bytes: None,
+        });
+    };
+    let state =
+        ReaderState::parse(&bytes).map_err(|e| Stop::Failed(format!("{}: {e}", path.display())))?;
+    let etag = serde_json::from_slice::<Value>(&bytes)
+        .ok()
+        .and_then(|v| v.get("etag").and_then(Value::as_str).map(str::to_owned));
+    Ok(Held {
+        state,
+        etag,
+        bytes: Some(bytes),
+    })
+}
+
+/// Writes `bytes` to `path` without ever replacing a file: to a temporary
+/// file, then a hard link, which fails if `path` exists. A file already
+/// there with the same bytes is the same delivery made again (a pull that
+/// died before it saved its state), and is fine; any other is refused.
+fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let fail = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
+    let parent = path.parent().ok_or_else(|| fail(&"no directory"))?;
+    std::fs::create_dir_all(parent).map_err(|e| fail(&e))?;
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("bundle");
+    let temp = parent.join(format!(".{name}.tmp-{}", std::process::id()));
+    let _ = std::fs::remove_file(&temp);
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        std::io::Write::write_all(&mut file, bytes)?;
+        file.sync_all()?;
+        drop(file);
+        match std::fs::hard_link(&temp, path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if std::fs::read(path)? == bytes {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::new(
+                        e.kind(),
+                        "already exists with other contents; not overwriting it",
+                    ))
+                }
+            }
+            // A file system without hard links: rename, after checking it isn't there.
+            Err(_) if !path.exists() => std::fs::rename(&temp, path),
+            Err(e) => Err(e),
+        }
+    })();
+    let _ = std::fs::remove_file(&temp);
+    result.map_err(|e| fail(&e))
+}
+
+fn pull_feed(args: PullArgs) -> Result<(), Stop> {
+    let approved = args
+        .approve
+        .iter()
+        .map(|text| {
+            crate::parse_pin(text).map_err(|e| Stop::Failed(format!("--approve {text}: {e}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let conn = read_connection(&args.connection)?;
+    let state_path = args
+        .state
+        .join(format!("{}.json", conn.feed.replace('/', "__")));
+    let Held {
+        mut state,
+        etag,
+        bytes: held_bytes,
+    } = load_state(&state_path)?;
+    let mut approving = false;
+    for pin in approved {
+        if !state.approved.contains(&pin) {
+            state.approved.push(pin);
+            approving = true;
+        }
+    }
+    // A newly approved key can change what a poll accepts, so the index is
+    // fetched whole.
+    let etag = if approving { None } else { etag };
+
+    let mut signatures = std::collections::BTreeMap::new();
+    let out = args.out.clone();
+    let report = poll(
+        &conn,
+        args.key_origin.as_deref(),
+        Some(&mut state),
+        etag.clone(),
+        &mut |d| {
+            let zip = bundle::to_zip(&d.bundle).map_err(|p| p.join("; "))?;
+            let name = format!("{}.zip", d.published_at.replace(':', "-"));
+            write_new(&out.join(&d.stream.id).join(name), &zip)?;
+            signatures.insert(d.stream.id.clone(), d.signature);
+            Ok(())
+        },
+    )?;
+
+    // A refused or failed index changed nothing; the state stays as it was.
+    let kept_etag = match &report.index {
+        IndexOutcome::Accepted => report
+            .etag
+            .clone()
+            .filter(|_| report.pending_keys.is_empty()),
+        IndexOutcome::NotModified => etag,
+        IndexOutcome::Refused(_) | IndexOutcome::Failed(_) => None,
+    };
+    if matches!(
+        report.index,
+        IndexOutcome::Accepted | IndexOutcome::NotModified
+    ) {
+        let bytes = render_state(&state, kept_etag.as_deref());
+        if held_bytes.as_deref() != Some(bytes.as_slice()) {
+            std::fs::create_dir_all(&args.state)
+                .map_err(|e| Stop::Failed(format!("{}: {e}", args.state.display())))?;
+            write_atomic(&state_path, &bytes)?;
+        }
+    }
+    report_poll(&report, &signatures)
 }
