@@ -2,6 +2,9 @@
 //! portable, pragmatic security records.
 //!
 //! - [`bundle`]: packing, opening and verifying bundles;
+//! - [`code`]: the outcome codes readers return;
+//! - [`sign`]: Ed25519 keys, contexts and signature files;
+//! - [`time`]: RFC 3339 instants;
 //! - [`short_form`]: the schema language, expanding short-form schemas to
 //!   JSON Schema 2020-12 and generating them back;
 //! - [`yaml`]: the restricted YAML the short form is written in;
@@ -12,9 +15,12 @@
 //!   `validate`).
 
 pub mod bundle;
+pub mod code;
 pub mod compat;
 pub mod lint;
 pub mod short_form;
+pub mod sign;
+pub mod time;
 #[cfg(feature = "validate")]
 pub mod validate;
 pub mod yaml;

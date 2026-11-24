@@ -21,3 +21,11 @@ zip.workspace = true
 flate2.workspace = true
 sha2.workspace = true
 jsonschema = { workspace = true, optional = true }
+ed25519-dalek.workspace = true
+time.workspace = true
+getrandom.workspace = true
+
+# getrandom has no source on wasm32-unknown-unknown without `js`, so the core crate
+# builds there on its own.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
