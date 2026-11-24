@@ -75,6 +75,22 @@ fn zip_entry(zip: &Path, name: &str) -> Vec<u8> {
 }
 
 #[test]
+fn bundle_and_identity_cannot_both_be_stdin() {
+    for sub in ["verify", "unpack"] {
+        let mut args = vec![arg("bundle"), arg(sub), arg("-"), arg("-i"), arg("-")];
+        if sub == "unpack" {
+            args.extend([arg("-d"), arg("/nonexistent/out")]);
+        }
+        let result = legible(&args);
+        assert_eq!(result.status.code(), Some(2), "{result:?}");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains("-i -"),
+            "{result:?}"
+        );
+    }
+}
+
+#[test]
 fn unpack_keeps_signature_bytes() {
     let temp = Temp::new("unpack");
     let zip = write_signed(&temp);
