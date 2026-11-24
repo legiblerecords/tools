@@ -333,7 +333,7 @@ fn endorsement_file(sig: &[u8]) -> Result<SignatureFile, Code> {
 ///
 /// `previous` is the last key set the reader accepted, or `None`; `anchors`
 /// are its pinned and approved keys (a stateless reader passes its pins and
-/// `None`). A `keys.sig` by a key that is no anchor, or one the anchors
+/// `None`). A `keys.sig` by a key that is no anchor, an alias, or one the anchors
 /// disagree about, is no endorsement rather than a bad one.
 ///
 /// Step 1's checks that need the reader's clock or where the set came from
@@ -413,6 +413,16 @@ pub fn accept_key_set(
     }
     if new.revokes(&file.key, Some(endorser)) {
         return Err(Code::BadEndorsement);
+    }
+    // An anchor whose public key the held set or this new set lists under
+    // another id is no anchor (one key, one name): no endorsement.
+    let aliased = |set: &KeySet| {
+        set.keys
+            .iter()
+            .any(|k| k.id != file.key && &k.public_key == endorser)
+    };
+    if held.is_some_and(aliased) || aliased(new) {
+        return Ok(unendorsed);
     }
     if alg != "ed25519" {
         return Err(Code::BadEndorsement);

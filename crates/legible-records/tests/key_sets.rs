@@ -293,3 +293,37 @@ fn pin_a_key_set_lists_under_another_id_is_unknown() {
         Lookup::Found(_, KeyState::Active)
     ));
 }
+
+#[test]
+fn keys_sig_by_an_aliased_anchor_is_no_endorsement() {
+    use legible_records::sign::{sign, Context, SigningKey};
+    // Test-only seed. P is pinned as "x"; the new set lists P as "y" and adds
+    // a key, and keys.sig by P names "x".
+    let key = SigningKey::from_seed("acme.example", "x", [7; 32]).unwrap();
+    let public = b64url(&key.public().key);
+    let set = format!(
+        r#"{{"$type":"org.legiblerecords.keys","version":1,"publisher":"acme.example","updated_at":"2026-11-24T00:00:00Z","keys":[{{"id":"y","alg":"ed25519","public_key":"{public}","created_at":"2026-11-24T00:00:00Z"}},{{"id":"next","alg":"ed25519","public_key":"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg","created_at":"2026-11-24T00:00:00Z"}}]}}"#
+    );
+    let anchors = [pin("x", &public)];
+    let now = time::parse("2026-12-01T00:00:00Z").unwrap();
+    let sig = sign(&key, Context::Keys, set.as_bytes()).to_bytes();
+    let verdict = decide_key_set(None, &anchors, set.as_bytes(), Some(&sig), now, None);
+    assert_eq!(verdict.outcome, Ok(KeySetDecision::NeedsApproval));
+
+    // The same alias in the held set: the new set lists P as "y" too.
+    let held = KeySet::parse(
+        format!(
+            r#"{{"$type":"org.legiblerecords.keys","version":1,"publisher":"acme.example","updated_at":"2026-11-23T00:00:00Z","keys":[{{"id":"y","alg":"ed25519","public_key":"{public}","created_at":"2026-11-23T00:00:00Z"}}]}}"#
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+    let verdict = decide_key_set(Some(&held), &anchors, set.as_bytes(), Some(&sig), now, None);
+    assert_eq!(verdict.outcome, Ok(KeySetDecision::NeedsApproval));
+
+    // Not an alias: the same set under the pinned id is endorsed.
+    let own = set.replace("\"id\":\"y\"", "\"id\":\"x\"");
+    let sig = sign(&key, Context::Keys, own.as_bytes()).to_bytes();
+    let verdict = decide_key_set(None, &anchors, own.as_bytes(), Some(&sig), now, None);
+    assert_eq!(verdict.outcome, Ok(KeySetDecision::Accepted));
+}
