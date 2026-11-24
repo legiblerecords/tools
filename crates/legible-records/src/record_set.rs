@@ -27,12 +27,89 @@ pub fn kind_of_path(path: &str) -> Option<&str> {
     (!kind.contains('/')).then_some(kind)
 }
 
-/// A record as one record-set line: compact, keys sorted, text as UTF-8, and
-/// a final `\n`.
+/// A record as one record-set line (spec/records.md § Record sets):
+/// compact, keys sorted by UTF-8 bytes, strings with only the escapes JSON
+/// requires, numbers as ECMAScript writes them (RFC 8785), and a final `\n`.
 pub fn canonical_line(record: &Value) -> Vec<u8> {
-    let mut line = serde_json::to_vec(record).expect("JSON values serialize");
+    let mut line = Vec::new();
+    write_canonical(record, &mut line);
     line.push(b'\n');
     line
+}
+
+fn write_canonical(value: &Value, out: &mut Vec<u8>) {
+    match value {
+        Value::Number(n) => {
+            out.extend_from_slice(es_number(n.as_f64().unwrap_or(f64::NAN)).as_bytes())
+        }
+        Value::Array(items) => {
+            out.push(b'[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(b',');
+                }
+                write_canonical(item, out);
+            }
+            out.push(b']');
+        }
+        // serde_json's map is ordered by String, which is UTF-8 byte order.
+        Value::Object(map) => {
+            out.push(b'{');
+            for (i, (key, item)) in map.iter().enumerate() {
+                if i > 0 {
+                    out.push(b',');
+                }
+                out.extend(serde_json::to_vec(key).expect("strings serialize"));
+                out.push(b':');
+                write_canonical(item, out);
+            }
+            out.push(b'}');
+        }
+        // Null, booleans and strings: serde_json escapes exactly what JSON requires.
+        other => out.extend(serde_json::to_vec(other).expect("JSON values serialize")),
+    }
+}
+
+/// ECMAScript's Number::toString for a finite double (RFC 8785 § 3.2.2.3).
+/// A non-finite value can't come from parsed JSON; it is written as `null`.
+pub fn es_number(x: f64) -> String {
+    if !x.is_finite() {
+        return "null".to_owned();
+    }
+    if x == 0.0 {
+        return "0".to_owned();
+    }
+    // Rust's `{:e}` gives the shortest digits that round-trip: "1.2345e-7".
+    let shortest = format!("{:e}", x.abs());
+    let (mantissa, exponent) = shortest.split_once('e').expect("{:e} has an exponent");
+    let digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
+    let k = digits.len() as i64;
+    // The value is 0.digits × 10^n.
+    let n = exponent
+        .parse::<i64>()
+        .expect("{:e} exponent is an integer")
+        + 1;
+    let text = if k <= n && n <= 21 {
+        format!("{digits}{}", "0".repeat((n - k) as usize))
+    } else if 0 < n && n <= 21 {
+        format!("{}.{}", &digits[..n as usize], &digits[n as usize..])
+    } else if -6 < n && n <= 0 {
+        format!("0.{}{digits}", "0".repeat((-n) as usize))
+    } else {
+        let e = n - 1;
+        let sign = if e >= 0 { "+" } else { "-" };
+        let rest = if k > 1 {
+            format!(".{}", &digits[1..])
+        } else {
+            String::new()
+        };
+        format!("{}{rest}e{sign}{}", &digits[..1], e.abs())
+    };
+    if x < 0.0 {
+        format!("-{text}")
+    } else {
+        text
+    }
 }
 
 fn is_key(text: &str) -> bool {

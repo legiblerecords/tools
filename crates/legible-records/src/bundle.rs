@@ -418,6 +418,9 @@ pub fn pack_with(
     })
 }
 
+/// A reference a record makes: the kinds it may point at, and the reference.
+type Reference = (Vec<String>, String);
+
 /// Records not given as a set, per kind and version: (key, record, input name).
 type Loose = BTreeMap<String, BTreeMap<u64, Vec<(String, Value, String)>>>;
 
@@ -744,9 +747,35 @@ pub fn verify(bundle: &Opened, schemas: &[Value]) -> Report {
         return report;
     };
     let mut seen = BTreeSet::new();
-    // Each record with where it came from, and every kind:key in the bundle.
-    let mut records: Vec<(String, Value)> = Vec::new();
+    // Every kind:key in the bundle, and each record's outgoing references,
+    // resolved once every key is known. Records themselves aren't kept, so a
+    // large record set is checked one line at a time.
+    let mut pending: Vec<(String, Vec<Reference>)> = Vec::new();
+    let mut unchecked = BTreeSet::new();
     let mut keys: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut outgoing = |problems: &mut Vec<String>, label: String, record: &Value| {
+        let mut found = Vec::new();
+        attachment_refs(record, &mut found);
+        for sha in found {
+            if !bundle.files.contains_key(&format!("files/{sha}")) {
+                problems.push(format!(
+                    "{label}: refers to attachment {sha}, which isn't in the bundle"
+                ));
+            }
+        }
+        let Some((kind, version)) = record_type(record) else {
+            return;
+        };
+        let Some(schema) = schema_for(schemas, kind, version) else {
+            unchecked.insert(format!("{kind} v{version}"));
+            return;
+        };
+        let mut refs = Vec::new();
+        record_refs(schema, schema, record, &mut refs, 0);
+        if !refs.is_empty() {
+            pending.push((label, refs));
+        }
+    };
     let mut add_key = |problems: &mut Vec<String>, kind: &str, key: &str, path: &str| {
         if !keys.insert((kind.to_owned(), key.to_owned())) {
             problems.push(format!("{path}: {kind}:{key} appears twice in the bundle"));
@@ -767,10 +796,11 @@ pub fn verify(bundle: &Opened, schemas: &[Value]) -> Report {
             problems.push(format!("{path}: listed but missing"));
             continue;
         };
-        if sha256_hex(bytes) != sha {
+        let is_set = path.starts_with("records/") && path.ends_with(".ndjson");
+        // A record set's reader hashes it as it reads.
+        if !is_set && sha256_hex(bytes) != sha {
             problems.push(format!("{path}: SHA-256 doesn't match the manifest"));
         }
-        let is_set = path.starts_with("records/") && path.ends_with(".ndjson");
         if entry.get("count").is_some() && !is_set {
             problems.push(format!("{path}: count is only for a record set"));
         }
@@ -785,29 +815,47 @@ pub fn verify(bundle: &Opened, schemas: &[Value]) -> Report {
                 ));
                 continue;
             };
-            let kind = kind_of(schemas, kind_id, version);
-            if crate::record_set::kind_of_path(path) != Some(kind.as_str()) {
+            // The kind is the type's title when its schema is here; without
+            // it, the file's name, as for a per-record folder.
+            let named = crate::record_set::kind_of_path(path).filter(|k| is_key(k));
+            let kind = match schema_for(schemas, kind_id, version) {
+                Some(_) => Some(kind_of(schemas, kind_id, version)),
+                None => named.map(str::to_owned),
+            };
+            let Some(kind) = kind.filter(|k| named == Some(k.as_str())) else {
+                let folder = schema_for(schemas, kind_id, version)
+                    .map(|_| kind_of(schemas, kind_id, version))
+                    .unwrap_or_else(|| "<kind>".to_owned());
                 problems.push(format!(
                     "{path}: a {kind_id} record set belongs at {}",
-                    crate::record_set::set_path(&kind)
+                    crate::record_set::set_path(&folder)
                 ));
                 continue;
-            }
+            };
             let expect = crate::record_set::Expect {
                 record_type: kind_id,
                 record_version: version,
                 count,
                 sha256: sha,
             };
-            match crate::record_set::check(bytes, expect) {
-                Ok(set) => {
-                    for record in set {
+            let mut reader = crate::record_set::Reader::new(bytes.as_slice(), expect);
+            while let Some(record) = reader.next_record() {
+                match record {
+                    Ok(record) => {
                         let id = record["id"].as_str().unwrap_or_default().to_owned();
                         add_key(problems, &kind, &id, path);
-                        records.push((format!("{path} ({kind}:{id})"), record));
+                        outgoing(problems, format!("{path} ({kind}:{id})"), &record);
                     }
+                    Err(problem) => problems.push(format!("{path}: {problem}")),
                 }
-                Err(found) => problems.extend(found.into_iter().map(|p| format!("{path}: {p}"))),
+            }
+            if let Err(problem) = reader.finish() {
+                if !problems
+                    .iter()
+                    .any(|p| p.starts_with(&format!("{path}: line")))
+                {
+                    problems.push(format!("{path}: {problem}"));
+                }
             }
             continue;
         }
@@ -841,9 +889,15 @@ pub fn verify(bundle: &Opened, schemas: &[Value]) -> Report {
                         .and_then(|rest| rest.strip_suffix(".json"))
                         .and_then(|rest| rest.split_once('/'))
                     {
-                        add_key(problems, found, key, path);
+                        // A per-record file's name is its record's key.
+                        match record.get("id") {
+                            Some(id) if id.as_str() != Some(key) => {
+                                problems.push(format!("{path}: its id isn't its file name, {key}"))
+                            }
+                            _ => add_key(problems, found, key, path),
+                        }
                     }
-                    records.push((path.to_owned(), record));
+                    outgoing(problems, path.to_owned(), &record);
                 }
                 Err(e) => problems.push(format!("{path}: not JSON: {e}")),
             }
@@ -854,29 +908,9 @@ pub fn verify(bundle: &Opened, schemas: &[Value]) -> Report {
             problems.push(format!("{path}: present but not listed in {MANIFEST}"));
         }
     }
-    let mut unchecked = BTreeSet::new();
-    for (path, record) in &records {
-        let mut found = Vec::new();
-        attachment_refs(record, &mut found);
-        for sha in found {
-            if !bundle.files.contains_key(&format!("files/{sha}")) {
-                problems.push(format!(
-                    "{path}: refers to attachment {sha}, which isn't in the bundle"
-                ));
-            }
-        }
-        let Some((kind, version)) = record_type(record) else {
-            continue;
-        };
-        let schema = schema_for(schemas, kind, version);
-        let Some(schema) = schema else {
-            unchecked.insert(format!("{kind} v{version}"));
-            continue;
-        };
-        let mut refs = Vec::new();
-        record_refs(schema, schema, record, &mut refs, 0);
+    for (path, refs) in &pending {
         for (kinds, reference) in refs {
-            let target = reference.split('#').next().unwrap_or(&reference);
+            let target = reference.split('#').next().unwrap_or(reference);
             let resolved = target.split_once(':').is_some_and(|(kind, key)| {
                 (kinds.is_empty() || kinds.iter().any(|k| k == kind))
                     && keys.contains(&(kind.to_owned(), key.to_owned()))

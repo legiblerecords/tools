@@ -265,3 +265,63 @@ fn reference_into_a_set_resolves() {
     );
     assert!(!pack("alert:a-99999").is_empty());
 }
+
+#[test]
+fn numbers_are_written_as_ecmascript_writes_them() {
+    let record: Value = serde_json::from_str(
+        r#"{"a":7.5,"b":0.00001,"c":1e-7,"d":1e21,"e":1e20,"f":123456789,"g":-3,"h":0,"i":0.5,"j":1e-6,"k":5e-324,"l":-0.0}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        String::from_utf8(record_set::canonical_line(&record)).unwrap(),
+        "{\"a\":7.5,\"b\":0.00001,\"c\":1e-7,\"d\":1e+21,\"e\":100000000000000000000,\"f\":123456789,\"g\":-3,\"h\":0,\"i\":0.5,\"j\":0.000001,\"k\":5e-324,\"l\":0}\n"
+    );
+}
+
+#[test]
+fn escapes_are_only_what_json_requires() {
+    let record = json!({"s": "a\"b\\c\u{8}\u{c}\n\r\t\u{1}\u{1f}/\u{7f}\u{2028}é"});
+    assert_eq!(
+        String::from_utf8(record_set::canonical_line(&record)).unwrap(),
+        "{\"s\":\"a\\\"b\\\\c\\b\\f\\n\\r\\t\\u0001\\u001f/\u{7f}\u{2028}é\"}\n"
+    );
+}
+
+#[test]
+fn keys_sort_by_utf8_bytes() {
+    // U+FF61 sorts before U+1F600 by UTF-8 bytes; by UTF-16 code units it sorts after.
+    let record = json!({"\u{1F600}": 1, "\u{FF61}": 2, "a": 3});
+    assert_eq!(
+        String::from_utf8(record_set::canonical_line(&record)).unwrap(),
+        "{\"a\":3,\"\u{FF61}\":2,\"\u{1F600}\":1}\n"
+    );
+}
+
+#[test]
+fn a_set_named_by_title_verifies_without_the_schema() {
+    let schema = json!({
+        "$id": "https://example.org/schemas/example.alert/v1.json",
+        "title": "vuln-alert",
+        "type": "object",
+        "properties": {"$type": {"const": "example.alert"}, "version": {"const": 1}}
+    });
+    let inputs: Vec<Input> = alerts(2, 1)
+        .iter()
+        .map(|a| input(&format!("{}.json", a["id"].as_str().unwrap()), a))
+        .collect();
+    let options = PackOptions {
+        sets: SetMode::Kinds(vec!["vuln-alert".to_owned()]),
+        ..PackOptions::default()
+    };
+    let packed = pack_with(&inputs, std::slice::from_ref(&schema), &options).unwrap();
+    assert_eq!(
+        manifest_paths(&packed.manifest),
+        vec!["records/vuln-alert.ndjson".to_owned()]
+    );
+    let opened = open(&packed.zip, Limits::default()).unwrap();
+    assert!(
+        verify(&opened, &[]).problems.is_empty(),
+        "{:?}",
+        verify(&opened, &[]).problems
+    );
+}
