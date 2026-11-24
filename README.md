@@ -26,13 +26,13 @@ cargo install --git https://github.com/legiblerecords/tools legible
 | `legible check-compat <old> <new>` | Lists changes that would break readers or writers of the old version |
 | `legible validate -s <schema> <record.json>…` | Validates records against their types, chosen by `$type` and `version` |
 | `legible bundle pack <file or dir>… -o <bundle.zip>` | Packs records and attachments into a bundle |
-| `legible bundle verify <bundle.zip>` | Checks a bundle's hashes, file list and references |
-| `legible bundle unpack <bundle.zip> -d <dir>` | Verifies a bundle (as `verify` does), then writes its files into a new or empty directory |
+| `legible bundle verify <bundle> [-i <identity>] [--pin …] [--key-set …]` | Checks a bundle's hashes, file list, references and signature; decrypts an encrypted one with `-i` |
+| `legible bundle unpack <bundle> -d <dir> [-i <identity>] [--pin …] [--key-set …]` | Verifies a bundle (as `verify` does), then writes its files, with `manifest.json` and `manifest.sig` exactly as stored, into a new or empty directory |
 | `legible keys new --publisher <domain> --id <id> -o <key.json>` | Makes a signing key: the secret goes to a new file (mode 0600, never overwritten), the key-set entry is printed |
 | `legible keys sign <keys.json> -k <key.json> -o <keys.sig>` | Signs a key set as stored, endorsing it |
 | `legible bundle sign <bundle.zip> -k <key.json> -o <signed.zip>` | Signs a bundle's manifest as stored |
 | `legible feed publish <dir> --feed <id> --stream <id> …` | Packs records into a stream of a feed in a directory: the bundle, then `feed.json` (or `.age`) and `feed.sig` |
-| `legible feed check <connection.json>` | Polls a feed and reports each stream's outcome; keeps and delivers nothing |
+| `legible feed check <connection.json>` | Polls a feed and reports each stream's outcome; stateless, so it keeps and delivers nothing |
 | `legible feed pull <connection.json> --state <dir> --out <dir>` | Polls a feed, writes each accepted bundle to `<out>/<stream>/<published_at>-<hash>.zip`, and keeps the reader state |
 
 For a published type, give the base of its `$id` with `--base`, such as `--base https://monorail.tech/schemas/`. Shared names such as `date` then point at `org.legiblerecords.common`.
@@ -51,11 +51,11 @@ legible bundle sign evidence.zip -k acme-2026-11.key.json -o evidence.signed.zip
 legible bundle verify evidence.signed.zip --pin acme.example/2026-11=<public_key>
 ```
 
-`bundle verify` and `bundle unpack` take `--pin <publisher>/<id>=<public_key>` and `--key-set <keys.json>`, each repeatable. A key set is read from a file; nothing is fetched. `verify` prints one line about the signature: `signature: verified (<publisher> <key>)`, `signature: unverified`, or the outcome code of a signature that failed, such as `signature: unknown_key` (exit 1).
+`bundle verify` and `bundle unpack` take `--pin <publisher>/<id>=<public_key>` and `--key-set <keys.json>`, each repeatable. A key set is read from a file; nothing is fetched. A pin and a key set that disagree about a key id make that id untrusted (`unknown_key`), and a key a key set revokes is revoked even if pinned. A `--pin` or `--key-set` that can't be read is exit 2, naming it. Both print one line about the signature: `signature: verified (<publisher> <key>)`, `signature: unverified`, or the outcome code of a signature that failed, such as `signature: unknown_key` (exit 1). An encrypted bundle is decrypted with `-i <age identity file>`; the bundle and the identity can't both be `-` (stdin).
 
 Exit 0 from `verify` doesn't mean a signature was checked. A signed bundle given no `--pin` or `--key-set` prints `signature: unverified (signed by <publisher> <key>; no trusted keys given)` and exits 0; only `verified` means it was checked. Keep the secret key file private: `keys new` creates it readable by you alone and prints only the public entry.
 
-`keys sign` signs a key set with a key already in the set readers hold, which endorses the new set (for example one that adds the next key).
+`keys sign` signs a key set with a key already in the set readers hold, which endorses the new set (for example one that adds the next key). It warns when the key isn't in the set it signs.
 
 Exit status is 0 when everything passes, 1 when the input has problems, and 2 when the tool couldn't run. `validate` never fetches anything: every schema it needs is given with `-s`, and `org.legiblerecords.common` version 1 is built in.
 
@@ -70,11 +70,12 @@ npx @legiblerecords/legible bundle pack evidence/ -o evidence.zip.age --passphra
 npx @legiblerecords/legible bundle unpack evidence.zip.age -d evidence               # prompts for it
 ```
 
-With this tool, pipe through [age](https://age-encryption.org), which can also encrypt to SSH keys:
+With this tool, encrypt by piping through [age](https://age-encryption.org) to an age recipient, and decrypt with `-i`, which `verify` and `unpack` take directly:
 
 ```sh
-legible bundle pack evidence/ -o - | age -R ~/.ssh/id_ed25519.pub > evidence.zip.age
-age -d -i ~/.ssh/id_ed25519 evidence.zip.age > evidence.zip && legible bundle unpack evidence.zip -d evidence
+age-keygen -o reader.age.txt   # prints the recipient, age1...
+legible bundle pack evidence/ -o - | age -r age1... > evidence.zip.age
+legible bundle unpack evidence.zip.age -i reader.age.txt -d evidence
 ```
 
 All of them implement the [spec](https://github.com/legiblerecords/spec), and are tested against its vectors: `crates/legible-records/tests/vectors/` holds a copy, and `SOURCE` says which spec commit it came from.
@@ -92,7 +93,9 @@ legible feed publish ./site/track --feed acme.example/track --audience "Monorail
   --stream policy-acknowledgments --title x --withdraw -k acme-2026-11.key.json
 ```
 
-It packs the inputs into a bundle signed with `-k`, then writes the bundle, `feed.json` and `feed.sig` in that order, each by temporary file and rename. Give `-r <age recipient>` to encrypt the bundle and the index (an encrypted feed needs `-r` on every publish, and `-i <identity>` to read its index). Bundles no stream points at any more are deleted only with `--state <file>`, after `--grace` hours (default 24, at least 1).
+It packs the inputs into a bundle signed with `-k`, then writes the bundle, `feed.json` and `feed.sig` in that order, each by temporary file and rename. Give `-r <age recipient>` to encrypt the bundle and the index (an encrypted feed needs `-r` on every publish, and `-i <identity>` to read its index). Bundles no stream points at any more are deleted only with `--state <file>`, after `--grace` hours (default 24, at least 1); the state file also keeps each stream's last `published_at`, so a stream withdrawn and published again never goes back in time. A `--state` file that can't be read stops the publish before anything is written.
+
+With `-k`, `feed publish` builds on the existing index only if its `feed.sig` is that key's signature over it: an index that whoever can write the directory has changed is refused, as is one with no `feed.sig`. `--rebuild` starts the index again from the stream on the command line only, dropping the others, and says so. After rotating to a new key, publish once with `--rebuild` (or keep signing with the old key until every stream is republished). Keep the publish directory where the storage the feed is served from can't write to it, such as the machine or CI job that publishes, and copy it out from there: the publisher reads its own index back, and the signature check is what stops a changed one being signed again.
 
 **Reading.** A connection file says where a feed is, how to authenticate and which keys to trust. It names environment variables, never secrets:
 
@@ -113,11 +116,15 @@ ACME_FEED_TOKEN=... legible feed check connection.json
 ACME_FEED_TOKEN=... legible feed pull connection.json --state ~/.legible/state --out ~/records
 ```
 
-Both print one line per stream: `<id>: accepted (verified <publisher> <key>)`, `accepted (unverified)`, `unchanged`, `withdrawn`, the outcome code of a refusal (such as `replay` or `bad_signature`), or `failed: <message>`. A refused index prints `index: <code>`. A publisher's key set can add a key nobody endorsed; the key is not trusted until you approve it, and the pull prints it as `pending key: --approve <publisher>/<id>=<public_key>`. Give that argument (repeatable) to the next `feed pull`, which keeps it in the state.
+Both fetch the publisher's key set from `https://<publisher>/.well-known/legible-records/` on every poll, before the index, so a rotation or a revocation reaches them even when `feed.json` hasn't changed. They print one line per stream: `<id>: accepted (verified <publisher> <key>)`, `accepted (unverified)`, `unchanged`, `withdrawn`, the outcome code of a refusal (such as `replay`, `bad_signature`, or `revoked_key` for a stream forgotten because the key that signed it was revoked), or `failed: <message>`. A refused index prints `index: <code>`, and for `bad_feed` the reason on stderr. A refused key set prints `keys: <code>` (`bad_key_set`, `key_set_rollback` or `bad_endorsement`). A publisher's key set can add a key nobody endorsed; the key is not trusted until you approve it: the poll prints `keys: needs_approval` and `pending key: --approve <publisher>/<id>=<public_key>`. Give that argument (repeatable) to the next `feed pull`, which keeps it in the state.
 
-`feed check` is stateless: nothing is written, and the history checks (`replay`, `stale_feed`) need a state, so use it to see whether a feed and its signatures are good. `feed pull` keeps `<state>/<feed id with / as __>.json`, written by temporary file and rename and only when something changed; a refused or unreadable index leaves it untouched. The state holds what the spec's reader state does, and the index's ETag, so an unchanged feed costs one request. Bundles are written decrypted, exactly as stored, as `<out>/<stream>/<published_at with : as ->-<first 12 hex of the bundle's SHA-256>.zip` (so two different bundles never share a name), and a different file already there is never overwritten.
+`feed check` is stateless: nothing is written, its only anchors are the connection file's pins, and the history checks (`replay`, `stale_feed`) need a state, so use it to see whether a feed and its signatures are good, not as a reader. `feed pull` keeps `<state>/<feed id with / as __>.json`, written by temporary file and rename and only when something changed. A refused or unreadable index leaves the rest of it untouched, but the key steps run on every poll: an accepted key set is kept, and streams a revoked key signed are forgotten, whatever happens to the index. The state records who signed each stream's bundle and the index; a state file from an earlier version, without them, is still read, as if everything in it was unsigned, so a revocation clears those streams only once they have been accepted again. The state holds what the spec's reader state does, and the index's ETag, so an unchanged feed costs one request. Bundles are written decrypted, exactly as stored, as `<out>/<stream>/<published_at with : as ->-<first 12 hex of the bundle's SHA-256>.zip` (so two different bundles never share a name), and a different file already there is never overwritten.
 
-Exit status is 0 when everything is accepted, unchanged or withdrawn; 1 when any stream was refused or failed, the index was refused, or a key is pending approval; and 2 when the feed or its keys couldn't be reached and nothing could be checked, or the arguments or connection file are wrong.
+Exit status for `feed check` and `feed pull`:
+
+- **0**: everything is accepted, unchanged or withdrawn, and the key set (if the publisher serves one) was accepted. A key set that couldn't be fetched (a failure other than 404) while a pin, an approved key or a held key set can still check signatures is printed on stderr as `keys: failed: …` and is not on its own a reason for another status.
+- **1**: a stream was refused or failed, the index was refused, the key set was refused (`keys: <code>` on stdout), or a key waits for approval (`keys: needs_approval`).
+- **2**: the feed couldn't be read; or its key set couldn't be fetched and nothing else (a pin, an approved key, a held key set) says whether the publisher signs, so a 403 on `keys.json` can't make a signing publisher look like one without keys; or the arguments or connection file are wrong.
 
 #### Feeds in S3
 
