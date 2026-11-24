@@ -1398,6 +1398,7 @@ name = "legible-records-wasm"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.2.17",
+ "js-sys",
  "legible-records",
  "serde",
  "serde-wasm-bindgen",

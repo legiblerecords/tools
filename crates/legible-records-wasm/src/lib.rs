@@ -6,8 +6,11 @@
 //! validators (such as Ajv), and the expanded schemas are standard JSON
 //! Schema 2020-12.
 
+use legible_records::code::Code;
+use legible_records::keys::{KeySet, Pin, Trust};
 use legible_records::short_form::{self, Options};
-use legible_records::{bundle, compat, lint, yaml};
+use legible_records::sign::{self, SignatureFile, SigningKey};
+use legible_records::{bundle, compat, lint, time, yaml};
 use serde::Serialize;
 use serde_json::Value;
 use wasm_bindgen::prelude::*;
@@ -178,6 +181,57 @@ fn problems_error(problems: &[String]) -> JsError {
     JsError::new(&problems.join("\n"))
 }
 
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+extern "C" {
+    /// JavaScript's `Date.now()`: WebAssembly has no clock of its own.
+    #[wasm_bindgen(js_namespace = Date, js_name = now)]
+    fn date_now() -> f64;
+}
+
+/// The current instant, from the host's clock on WebAssembly.
+fn now() -> time::Instant {
+    #[cfg(target_arch = "wasm32")]
+    {
+        time::from_unix_millis(date_now() as i64)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        time::now()
+    }
+}
+
+/// Makes a signing key for a publisher (a lowercase domain) and a key id.
+/// Returns `{ secretKey: Uint8Array, keySetEntry }`: the secret key file's
+/// bytes, to be kept private, and the entry to add to the publisher's
+/// keys.json.
+#[wasm_bindgen(js_name = generateKey)]
+pub fn generate_key(publisher: &str, id: &str) -> Result<JsValue, JsError> {
+    let key = SigningKey::generate(publisher, id).map_err(|e| JsError::new(&e))?;
+    let entry = serde_json::json!({
+        "id": key.id,
+        "alg": "ed25519",
+        "public_key": sign::b64url(&key.public().key),
+        "created_at": time::format(now()),
+    });
+    let secret = key.to_json();
+    let out = js_sys::Object::new();
+    let secret_key = js_sys::Uint8Array::from(secret.as_slice());
+    js_sys::Reflect::set(&out, &"secretKey".into(), &secret_key)
+        .and_then(|_| js_sys::Reflect::set(&out, &"keySetEntry".into(), &to_js(&entry)?))
+        .map_err(|_| JsError::new("couldn't build the result"))?;
+    Ok(out.into())
+}
+
+/// Signs a bundle's manifest as stored, returning the bundle's bytes with
+/// `manifest.sig` added. `secretKey` is the file `generateKey` returned.
+/// Throws when the bundle has problems or is already signed.
+#[wasm_bindgen(js_name = signBundle)]
+pub fn sign_bundle(zip: &[u8], secret_key: &[u8]) -> Result<Vec<u8>, JsError> {
+    let key = SigningKey::from_json(secret_key).map_err(|e| JsError::new(&e))?;
+    bundle::add_signature(zip, &key, bundle::Limits::default()).map_err(|p| problems_error(&p))
+}
+
 /// Builds a bundle: `add` each file, then `finish`. A `.json` file with
 /// `$type` and `version` becomes a record; anything else an attachment.
 #[wasm_bindgen]
@@ -287,4 +341,107 @@ impl Bundle {
             "uncheckedTypes": report.unchecked_types,
         }))
     }
+
+    /// Checks the manifest's signature against the keys given:
+    /// `{ pins?: [{ publisher, id, publicKey }], keySets?: [Uint8Array],
+    /// expectedPublisher? }`, a key set being a publisher's keys.json as
+    /// stored. Returns `{ status: "verified", publisher, key }` or
+    /// `{ status: "unverified" }`. Throws an `Error` whose `message` is the
+    /// outcome code, such as `unknown_key` or `bad_signature`.
+    #[wasm_bindgen(js_name = verifySignature)]
+    pub fn verify_signature(&self, options: JsValue) -> Result<JsValue, JsError> {
+        let (trust, expected) = trust_options(options)?;
+        match bundle::check_signature(&self.opened, &trust, expected.as_deref()) {
+            Ok(bundle::SignatureStatus::Verified { publisher, key }) => to_js(
+                &serde_json::json!({"status": "verified", "publisher": publisher, "key": key}),
+            ),
+            Ok(bundle::SignatureStatus::Unverified) => {
+                to_js(&serde_json::json!({"status": "unverified"}))
+            }
+            Err(code) => Err(code_error(code)),
+        }
+    }
+
+    /// Who the manifest says signed it, without checking: `{ publisher, key }`,
+    /// or `undefined` for an unsigned bundle. Throws `bad_signature_file` when
+    /// manifest.sig isn't the JSON the spec defines.
+    #[wasm_bindgen(js_name = signedBy)]
+    pub fn signed_by(&self) -> Result<JsValue, JsError> {
+        match &self.opened.signature {
+            None => Ok(JsValue::UNDEFINED),
+            Some(bytes) => {
+                let sig = SignatureFile::parse(bytes).map_err(code_error)?;
+                to_js(&serde_json::json!({"publisher": sig.publisher, "key": sig.key}))
+            }
+        }
+    }
+}
+
+fn code_error(code: Code) -> JsError {
+    JsError::new(code.as_str())
+}
+
+/// Reads `{ pins?, keySets?, expectedPublisher? }`.
+fn trust_options(value: JsValue) -> Result<(Trust, Option<String>), JsError> {
+    let mut trust = Trust::default();
+    if value.is_undefined() || value.is_null() {
+        return Ok((trust, None));
+    }
+    let get = |name: &str| -> Result<JsValue, JsError> {
+        js_sys::Reflect::get(&value, &name.into())
+            .map_err(|_| JsError::new("options must be an object"))
+    };
+    let pins = get("pins")?;
+    if !pins.is_undefined() && !pins.is_null() {
+        let Value::Array(list) = from_js(pins, "pins")? else {
+            return Err(JsError::new("pins must be an array"));
+        };
+        for p in &list {
+            let text = |key: &str| {
+                p.get(key)
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| JsError::new(&format!("a pin needs a string {key}")))
+            };
+            let (publisher, id) = (text("publisher")?, text("id")?);
+            let public_key: [u8; 32] = sign::from_b64url(text("publicKey")?)
+                .ok()
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or_else(|| {
+                    JsError::new("a pin's publicKey isn't 32 bytes of base64url without padding")
+                })?;
+            trust.pins.push(Pin {
+                publisher: publisher.to_owned(),
+                id: id.to_owned(),
+                public_key,
+            });
+        }
+    }
+    let sets = get("keySets")?;
+    if !sets.is_undefined() && !sets.is_null() {
+        if !js_sys::Array::is_array(&sets) {
+            return Err(JsError::new("keySets must be an array"));
+        }
+        for set in js_sys::Array::from(&sets).iter() {
+            if !set.is_instance_of::<js_sys::Uint8Array>() {
+                return Err(JsError::new("a key set must be a Uint8Array of its JSON"));
+            }
+            let bytes = js_sys::Uint8Array::new(&set).to_vec();
+            let parsed = KeySet::parse(&bytes).map_err(code_error)?;
+            let publisher = parsed.publisher.clone();
+            if trust.key_sets.insert(publisher.clone(), parsed).is_some() {
+                return Err(JsError::new(&format!("a second key set for {publisher}")));
+            }
+        }
+    }
+    let expected = get("expectedPublisher")?;
+    let expected = if expected.is_undefined() || expected.is_null() {
+        None
+    } else {
+        Some(
+            expected
+                .as_string()
+                .ok_or_else(|| JsError::new("expectedPublisher must be a string"))?,
+        )
+    };
+    Ok((trust, expected))
 }

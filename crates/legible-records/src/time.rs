@@ -16,7 +16,17 @@ pub fn parse(s: &str) -> Result<Instant, String> {
         .map_err(|e| format!("{s:?} is not an RFC 3339 date-time: {e}"))
 }
 
-/// The current instant, from the system clock.
+/// The instant `millis` after the Unix epoch (before it, when negative).
+/// Where there is no system clock, such as WebAssembly in a browser, the
+/// caller supplies the time with this; an out-of-range value is the epoch.
+pub fn from_unix_millis(millis: i64) -> Instant {
+    let nanos = i128::from(millis) * 1_000_000;
+    Instant(OffsetDateTime::from_unix_timestamp_nanos(nanos).unwrap_or(OffsetDateTime::UNIX_EPOCH))
+}
+
+/// The current instant, from the system clock. On `wasm32-unknown-unknown`
+/// the standard library has no clock and this panics: use
+/// [`from_unix_millis`] with a time the host supplies.
 pub fn now() -> Instant {
     Instant(OffsetDateTime::now_utc())
 }
