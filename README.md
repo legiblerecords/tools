@@ -25,6 +25,7 @@ cargo install --git https://github.com/legiblerecords/tools legible
 | `legible lint <schema>` | Checks a published type against the published subset |
 | `legible check-compat <old> <new>` | Lists changes that would break readers or writers of the old version |
 | `legible validate -s <schema> <record.json>…` | Validates records against their types, chosen by `$type` and `version` |
+| `legible record hash <record.json>…` | Prints each record's content hash, the SHA-256 of its canonical line without `produced_by` and `source`: what an external reference's `sha256` pins |
 | `legible bundle pack <file or dir>… -o <bundle.zip>` | Packs records and attachments into a bundle |
 | `legible bundle verify <bundle> [-i <identity>] [--pin …] [--key-set …]` | Checks a bundle's hashes, file list, references and signature; decrypts an encrypted one with `-i` |
 | `legible bundle unpack <bundle> -d <dir> [-i <identity>] [--pin …] [--key-set …]` | Verifies a bundle (as `verify` does), then writes its files, with `manifest.json` and `manifest.sig` exactly as stored, into a new or empty directory |

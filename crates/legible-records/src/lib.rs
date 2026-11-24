@@ -4,6 +4,7 @@
 //! - [`age`]: encrypted bundles and feeds (encrypting and decrypting need
 //!   feature `age`);
 //! - [`bundle`]: packing, opening and verifying bundles;
+//! - [`record`]: a record's content line and content hash;
 //! - [`record_set`]: record sets, many records of one type in one NDJSON
 //!   file, written, checked and read as a stream;
 //! - [`code`]: the outcome codes readers return;
@@ -31,6 +32,7 @@ pub mod keys;
 pub mod lint;
 #[cfg(feature = "net")]
 pub mod net;
+pub mod record;
 pub mod record_set;
 pub mod short_form;
 pub mod sign;

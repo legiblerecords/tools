@@ -77,10 +77,24 @@ enum Command {
     /// Make signing keys, and endorse key sets with them.
     #[command(subcommand)]
     Keys(KeysCommand),
+    /// Work with single records.
+    #[command(subcommand)]
+    Record(RecordCommand),
     /// Feeds: publish a stream into a feed's directory, check a feed (stateless), or pull one,
     /// keeping what the reader remembers.
     #[command(subcommand)]
     Feed(feed_cmd::FeedCommand),
+}
+
+#[derive(Subcommand)]
+enum RecordCommand {
+    /// Print each record's content hash, the SHA-256 of its canonical line without
+    /// produced_by and source: what an external reference's sha256 pins.
+    Hash {
+        /// Record files (.json), each one JSON object.
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -384,6 +398,29 @@ fn run(command: Command) -> Result<(), Stop> {
         }
         Command::Bundle(command) => run_bundle(command),
         Command::Keys(command) => run_keys(command),
+        Command::Record(RecordCommand::Hash { files }) => {
+            let mut clean = true;
+            for file in &files {
+                let text = std::fs::read(file)
+                    .map_err(|e| Stop::Failed(format!("{}: {e}", file.display())))?;
+                match serde_json::from_slice::<serde_json::Value>(&text) {
+                    Ok(record @ serde_json::Value::Object(_)) => println!(
+                        "{}  {}",
+                        legible_records::record::content_sha256(&record),
+                        file.display()
+                    ),
+                    Ok(_) => {
+                        eprintln!("{}: not a JSON object", file.display());
+                        clean = false;
+                    }
+                    Err(e) => {
+                        eprintln!("{}: not JSON: {e}", file.display());
+                        clean = false;
+                    }
+                }
+            }
+            outcome(clean)
+        }
     }
 }
 
