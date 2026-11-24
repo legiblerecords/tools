@@ -1,0 +1,129 @@
+{
+  "connection": {
+    "$type": "org.legiblerecords.feed-connection",
+    "auth": {
+      "method": "bearer",
+      "token_env": "ACME_FEED_TOKEN"
+    },
+    "feed": "acme.example/track",
+    "keys": [
+      {
+        "alg": "ed25519",
+        "id": "2026-11",
+        "public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+        "publisher": "acme.example"
+      }
+    ],
+    "location": {
+      "kind": "https",
+      "url": "https://feeds.acme.example/track/"
+    },
+    "version": 1
+  },
+  "expect": {
+    "index": "revoked_key",
+    "key_set": "bad_endorsement",
+    "state": {
+      "approved": [],
+      "feed_signer": {
+        "key": "2026-11",
+        "publisher": "acme.example"
+      },
+      "feed_updated_at": "2026-11-24T10:00:00Z",
+      "key_sets": {
+        "acme.example": {
+          "$type": "org.legiblerecords.keys",
+          "keys": [
+            {
+              "alg": "ed25519",
+              "created_at": "2026-11-24T00:00:00Z",
+              "id": "2026-11",
+              "public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg"
+            }
+          ],
+          "publisher": "acme.example",
+          "updated_at": "2026-11-24T00:00:00Z",
+          "version": 1
+        }
+      },
+      "streams": {
+        "access-reviews": {
+          "published_at": "2026-11-24T10:00:00Z",
+          "sha256": "3b3c44d605d3771889befdf4801924c40a0396b5271f8d44080f23a7303cb492",
+          "signer": {
+            "key": "2026-11",
+            "publisher": "acme.example"
+          }
+        },
+        "incidents": {
+          "published_at": "2026-11-24T10:00:00Z",
+          "sha256": "ff76ce16d62aa68247b53d9cc0cb4d1fe78eb146ef521945635abc6d64d75755",
+          "signer": {
+            "key": "2026-11",
+            "publisher": "acme.example"
+          }
+        },
+        "policy-acknowledgments": {
+          "published_at": "2026-11-24T10:00:00Z",
+          "sha256": "fc89dead8d7905bd4dae465c1ae3101cb301ff104878066cc91f6a6520304c52",
+          "signer": {
+            "key": "2026-11",
+            "publisher": "acme.example"
+          }
+        }
+      }
+    },
+    "streams": {}
+  },
+  "name": "bad-endorsement-set-revokes-signer",
+  "state": {
+    "approved": [],
+    "feed_signer": {
+      "key": "2026-11",
+      "publisher": "acme.example"
+    },
+    "feed_updated_at": "2026-11-24T10:00:00Z",
+    "key_sets": {
+      "acme.example": {
+        "$type": "org.legiblerecords.keys",
+        "keys": [
+          {
+            "alg": "ed25519",
+            "created_at": "2026-11-24T00:00:00Z",
+            "id": "2026-11",
+            "public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg"
+          }
+        ],
+        "publisher": "acme.example",
+        "updated_at": "2026-11-24T00:00:00Z",
+        "version": 1
+      }
+    },
+    "streams": {
+      "access-reviews": {
+        "published_at": "2026-11-24T10:00:00Z",
+        "sha256": "3b3c44d605d3771889befdf4801924c40a0396b5271f8d44080f23a7303cb492",
+        "signer": {
+          "key": "2026-11",
+          "publisher": "acme.example"
+        }
+      },
+      "incidents": {
+        "published_at": "2026-11-24T10:00:00Z",
+        "sha256": "ff76ce16d62aa68247b53d9cc0cb4d1fe78eb146ef521945635abc6d64d75755",
+        "signer": {
+          "key": "2026-11",
+          "publisher": "acme.example"
+        }
+      },
+      "policy-acknowledgments": {
+        "published_at": "2026-11-24T10:00:00Z",
+        "sha256": "fc89dead8d7905bd4dae465c1ae3101cb301ff104878066cc91f6a6520304c52",
+        "signer": {
+          "key": "2026-11",
+          "publisher": "acme.example"
+        }
+      }
+    }
+  }
+}

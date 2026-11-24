@@ -123,6 +123,15 @@ fn feed_vectors() {
         if served.is_dir() {
             got["key_set"] = json!(key_set_str(&report.key_set));
         }
+        // The state the poll leaves, when the case expects one: in the
+        // vectors' form, without the on-disk $type and version.
+        if let (Some(_), Some(state)) = (case["expect"].get("state"), &state) {
+            let mut value: Value = serde_json::from_slice(&state.to_bytes()).unwrap();
+            let object = value.as_object_mut().unwrap();
+            object.remove("$type");
+            object.remove("version");
+            got["state"] = value;
+        }
         let expect = &case["expect"];
         match (&got == expect, PENDING.contains(&name.as_str())) {
             (false, false) => {
@@ -272,7 +281,7 @@ fn accepted_delivery_updates_state() {
     assert_eq!(
         state.streams["policy-acknowledgments"],
         StreamState {
-            sha256: entry.sha256.clone(),
+            sha256: Some(entry.sha256.clone()),
             published_at: entry.published_at.clone(),
             signer: Some(Signer {
                 publisher: "acme.example".to_owned(),
@@ -1300,15 +1309,24 @@ fn revocation_counts_in_a_set_its_own_key_endorses() {
 #[test]
 fn a_rolled_back_set_that_passes_parsing_still_revokes() {
     // R1 again, with state: the served set is refused as a rollback, yet the
-    // key it revokes is revoked, and what it signed is forgotten.
+    // key it revokes is revoked on this poll. It isn't held, so it clears
+    // nothing: the stream a signed keeps its state, and a's new bundle for
+    // it is refused.
     let (a, b) = (key_a(), key_b());
     let mut source = build_feed(
         "2026-11-24T10:00:00Z",
-        &[Stream {
-            id: "notes",
-            published_at: "2026-11-24T10:00:00Z",
-            signer: Some(&b),
-        }],
+        &[
+            Stream {
+                id: "old",
+                published_at: "2026-11-24T10:00:00Z",
+                signer: Some(&a),
+            },
+            Stream {
+                id: "notes",
+                published_at: "2026-11-24T10:00:00Z",
+                signer: Some(&b),
+            },
+        ],
         Some(&b),
     );
     let mut state = ReaderState::default();
@@ -1319,7 +1337,7 @@ fn a_rolled_back_set_that_passes_parsing_still_revokes() {
     state.streams.insert(
         "old".to_owned(),
         StreamState {
-            sha256: "0".repeat(64),
+            sha256: Some("0".repeat(64)),
             published_at: "2026-11-23T00:00:00Z".to_owned(),
             signer: Some(Signer {
                 publisher: "acme.example".to_owned(),
@@ -1331,12 +1349,19 @@ fn a_rolled_back_set_that_passes_parsing_still_revokes() {
     let mut keys = FixedKeys(Ok(Some((older, None))), Vec::new());
     let report = run(&mut source, &mut keys, &conn_with(vec![]), Some(&mut state));
     assert_eq!(report.key_set, KeySetOutcome::Refused(Code::KeySetRollback));
+    assert_eq!(report.index, IndexOutcome::Accepted);
     assert_eq!(
         report.streams["old"],
         StreamOutcome::Refused(Code::RevokedKey)
     );
-    assert!(!state.streams.contains_key("old"));
+    assert_eq!(state.streams["old"].sha256, Some("0".repeat(64)));
+    assert_eq!(state.streams["old"].published_at, "2026-11-23T00:00:00Z");
+    assert!(state.streams["old"].signer.is_some());
     assert_eq!(report.streams["notes"], StreamOutcome::Accepted);
+    // The revocation is reported, as from a set that isn't held.
+    assert_eq!(report.revocations.len(), 1);
+    assert_eq!(report.revocations[0].id, "a");
+    assert!(!report.revocations[0].held);
     // The held set isn't replaced.
     assert!(state.key_sets["acme.example"]
         .get("a")
@@ -1399,7 +1424,16 @@ fn revocation_reaches_a_reader_whose_index_is_unchanged() {
     );
     assert_eq!(delivered, 0);
     assert_eq!(report.etag, None);
-    assert!(!state.streams.contains_key("notes"));
+    // Cleared: fetched anew next poll, with its published_at kept as the floor.
+    assert_eq!(
+        state.streams["notes"],
+        StreamState {
+            sha256: None,
+            published_at: "2026-11-24T10:00:00Z".to_owned(),
+            signer: None,
+        }
+    );
+    assert!(report.revocations.iter().any(|r| r.id == "a" && r.held));
     // The index (signed by b) was accepted, so its watermark stands.
     assert_eq!(
         state.feed_signer,
@@ -1450,4 +1484,192 @@ fn bad_feed_says_why() {
         "{:?}",
         report.index_detail
     );
+}
+
+// ---- N1: a revocation in a key set the reader doesn't hold. ----
+
+/// A key source that serves, poll by poll, the next key set in its script.
+struct ScriptedKeys(std::collections::VecDeque<KeySetFiles>);
+
+impl KeySource for ScriptedKeys {
+    fn key_set(&mut self, publisher: &str) -> Result<Option<KeySetFiles>, String> {
+        assert_eq!(publisher, "acme.example");
+        Ok(Some(self.0.pop_front().expect("a key set for every poll")))
+    }
+}
+
+/// A directory of its own under the system's temp directory, removed when dropped.
+struct TempDir(std::path::PathBuf);
+
+impl TempDir {
+    fn new(name: &str) -> TempDir {
+        let path = std::env::temp_dir().join(format!("legible-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        TempDir(path)
+    }
+
+    /// Replaces what the directory holds with `source`'s files.
+    fn serve(&self, source: &MemSource) {
+        let _ = std::fs::remove_dir_all(&self.0);
+        for (path, bytes) in &source.files {
+            let file = self.0.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, bytes).unwrap();
+        }
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn unheld_revocation_cannot_reopen_replay() {
+    // The reader holds a's key set and has accepted a feed a signed at 10:00.
+    // Poll 1: whoever controls the server serves an unsigned set that adds a
+    // key and revokes a. It waits for approval, so it isn't held: what a
+    // signed is refused on this poll, and the reader's state doesn't move.
+    // Poll 2: the genuine set again, with an older index and bundles that a
+    // really signed. The watermark and floors still refuse them.
+    let (a, b) = (key_a(), key_b());
+    let genuine = key_set_bytes("2026-11-24T00:00:00Z", &[&a]);
+    let attack = key_set_revoking("2026-11-24T00:00:00Z", &[&a, &b], &a);
+    let current = build_feed(
+        "2026-11-24T10:00:00Z",
+        &[
+            Stream {
+                id: "notes",
+                published_at: "2026-11-24T10:00:00Z",
+                signer: Some(&a),
+            },
+            Stream {
+                id: "reports",
+                published_at: "2026-11-24T10:00:00Z",
+                signer: Some(&a),
+            },
+        ],
+        Some(&a),
+    );
+    let old = build_feed(
+        "2026-11-24T09:00:00Z",
+        &[Stream {
+            id: "notes",
+            published_at: "2026-11-24T09:00:00Z",
+            signer: Some(&a),
+        }],
+        Some(&a),
+    );
+    let dir = TempDir::new("n1-attack");
+    dir.serve(&current);
+    let mut source = DirSource {
+        root: dir.0.clone(),
+    };
+    let mut keys = ScriptedKeys(
+        [(genuine.clone(), None), (attack, None), (genuine, None)]
+            .into_iter()
+            .collect(),
+    );
+    let conn = conn_with(vec![]);
+    let mut state = ReaderState::default();
+    let mut delivered = Vec::new();
+    let mut poll = |state: &mut ReaderState, source: &mut DirSource| {
+        pull(
+            source,
+            &mut keys,
+            &conn,
+            Some(state),
+            &mut |d| {
+                delivered.push((d.stream.id.clone(), d.published_at.clone()));
+                Ok(())
+            },
+            &options(),
+        )
+    };
+
+    // Poll 0: the genuine feed is accepted; the set adds a, so it needs
+    // approval unless pinned. Approve a so the set is accepted and held.
+    state.approved.push(pin(&a));
+    let report = poll(&mut state, &mut source);
+    assert_eq!(report.key_set, KeySetOutcome::Accepted);
+    assert_eq!(report.index, IndexOutcome::Accepted);
+    assert_eq!(report.streams["notes"], StreamOutcome::Accepted);
+    let accepted = state.clone();
+
+    // Poll 1: the pending set.
+    let first = poll(&mut state, &mut source);
+    let after_first = state.clone();
+    // Poll 2: the genuine set, and old content a really signed.
+    dir.serve(&old);
+    let second = poll(&mut state, &mut source);
+
+    // The old content is refused: the watermark is still there.
+    assert_eq!(second.key_set, KeySetOutcome::Accepted);
+    assert_eq!(
+        second.index,
+        IndexOutcome::Refused(Code::StaleFeed),
+        "{:?}",
+        second.streams
+    );
+    assert!(second.streams.is_empty(), "{:?}", second.streams);
+    assert_eq!(state, accepted);
+    // On poll 1 the pending set's revocation refused a's index, and changed
+    // nothing the reader keeps.
+    assert!(matches!(first.key_set, KeySetOutcome::Pending(_)));
+    assert_eq!(first.index, IndexOutcome::Refused(Code::RevokedKey));
+    assert!(first.streams.is_empty(), "{:?}", first.streams);
+    assert_eq!(after_first, accepted);
+    assert_eq!(
+        delivered,
+        [
+            ("notes".to_owned(), "2026-11-24T10:00:00Z".to_owned()),
+            ("reports".to_owned(), "2026-11-24T10:00:00Z".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn deliveries_say_which_revocations_are_held() {
+    // A stateless reader pins a and b. The publisher serves a set that revokes b:
+    // with no new key it is accepted, so the revocation is held, and a
+    // destination clears what b signed. With a new key as well, it waits
+    // for approval: the revocation still refuses b on this poll, but is not
+    // held, and a destination changes nothing for it.
+    let (a, b) = (key_a(), key_b());
+    let feed = || {
+        build_feed(
+            "2026-11-24T10:00:00Z",
+            &[Stream {
+                id: "notes",
+                published_at: "2026-11-24T10:00:00Z",
+                signer: Some(&a),
+            }],
+            Some(&a),
+        )
+    };
+    let c = SigningKey::from_seed("acme.example", "c", [9; 32]).unwrap();
+    for (keys, held) in [(vec![&a, &b], true), (vec![&a, &b, &c], false)] {
+        let set = key_set_revoking("2026-11-24T00:00:00Z", &keys, &b);
+        let mut served = FixedKeys(Ok(Some((set, None))), Vec::new());
+        let mut revocations = Vec::new();
+        let report = pull(
+            &mut feed(),
+            &mut served,
+            &conn_with(vec![pin(&a), pin(&b)]),
+            None,
+            &mut |d| {
+                revocations = d.revocations;
+                Ok(())
+            },
+            &options(),
+        );
+        assert_eq!(report.streams["notes"], StreamOutcome::Accepted);
+        assert_eq!(report.revocations, revocations);
+        assert_eq!(revocations.len(), 1, "{revocations:?}");
+        assert_eq!(revocations[0].id, "b");
+        assert_eq!(revocations[0].public_key, b.public().key);
+        assert_eq!(revocations[0].held, held);
+    }
 }

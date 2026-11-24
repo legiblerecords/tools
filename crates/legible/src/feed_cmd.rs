@@ -906,8 +906,8 @@ fn pull_feed(args: PullArgs) -> Result<(), Stop> {
     )?;
 
     // A refused or failed index changes nothing else, but the key steps run
-    // on every poll: a key set accepted, or streams a revoked key signed
-    // forgotten, are kept whatever became of the index.
+    // on every poll: a key set accepted, or streams a key the held set
+    // revokes signed cleared, are kept whatever became of the index.
     let kept_etag = match &report.index {
         IndexOutcome::Accepted => report
             .etag

@@ -497,6 +497,25 @@ pub enum Lookup {
     Unknown,
 }
 
+/// A key a key set marks revoked, as a poll reports it to a stateless
+/// reader's destination (feeds.md § Trust).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Revocation {
+    pub publisher: String,
+    /// The key's id in the set that revokes it.
+    pub id: String,
+    /// Its public key: a signer recorded under another id with these bytes
+    /// is revoked too.
+    pub public_key: [u8; 32],
+    pub revoked_at: String,
+    /// Whether the set that revokes it is held (one accepted on this poll
+    /// included). Only a held revocation clears what the key signed; one
+    /// from a set the reader doesn't hold (waiting for approval, or refused
+    /// as `bad_endorsement` or `key_set_rollback`) refuses what the key
+    /// signed on this poll and changes nothing the destination keeps.
+    pub held: bool,
+}
+
 /// The keys a reader trusts (feeds.md § Trust).
 #[derive(Clone, Debug, Default)]
 pub struct Trust {
@@ -508,7 +527,9 @@ pub struct Trust {
     /// Keys a person approved, trusted like pins.
     pub approved: Vec<Pin>,
     /// Key sets served on this poll that aren't held (waiting for approval,
-    /// or refused after step 1): their revocations count, nothing else.
+    /// or refused after step 1). Their revocations refuse signatures on this
+    /// poll, in [`Trust::lookup`], and do nothing else: they never clear
+    /// what a key signed ([`Trust::held_revokes`]).
     pub revoking: Vec<KeySet>,
     /// Publishers that served a valid key set record on this poll, whatever
     /// became of it: a reader trusts them for the unsigned rule.
@@ -559,16 +580,53 @@ impl Trust {
     }
 
     /// Whether the key `publisher` / `id`, which signed something the reader
-    /// accepted before, has been revoked since: by id, or by its bytes under
-    /// another id, in a held or revoking set.
-    pub fn is_revoked(&self, publisher: &str, id: &str) -> bool {
-        let found = sources(self.key_sets.get(publisher), &self.anchors(), publisher, id);
+    /// accepted before, has been revoked since by the held set: by id, or by
+    /// its bytes under another id. Only this clears what a key signed; a
+    /// revoking set that isn't held never does (feeds.md § Trust), since
+    /// anyone who controls the server can serve one with no key.
+    pub fn held_revokes(&self, publisher: &str, id: &str) -> bool {
+        let Some(held) = self.key_sets.get(publisher) else {
+            return false;
+        };
+        let found = sources(Some(held), &self.anchors(), publisher, id);
         if found.is_empty() {
-            return self.revokes(publisher, id, None);
+            return held.revokes(id, None);
+        }
+        found.iter().any(|(_, key)| held.revokes(id, Some(key)))
+    }
+
+    /// Every key the held set or a revoking set for `publisher` revokes,
+    /// marked by whether its set is held. A key both revoke is listed once,
+    /// as held.
+    pub fn revocations(&self, publisher: &str) -> Vec<Revocation> {
+        let mut found: Vec<Revocation> = Vec::new();
+        let held = self.key_sets.get(publisher).into_iter().map(|s| (s, true));
+        let unheld = self
+            .revoking
+            .iter()
+            .filter(|s| s.publisher == publisher)
+            .map(|s| (s, false));
+        for (set, is_held) in held.chain(unheld) {
+            for key in &set.keys {
+                let Some(revoked_at) = &key.revoked_at else {
+                    continue;
+                };
+                if found
+                    .iter()
+                    .any(|r| r.id == key.id && r.public_key == key.public_key)
+                {
+                    continue;
+                }
+                found.push(Revocation {
+                    publisher: set.publisher.clone(),
+                    id: key.id.clone(),
+                    public_key: key.public_key,
+                    revoked_at: revoked_at.clone(),
+                    held: is_held,
+                });
+            }
         }
         found
-            .iter()
-            .any(|(_, key)| self.revokes(publisher, id, Some(key)))
     }
 
     /// Whether the reader holds a pinned (or approved) key for this publisher.

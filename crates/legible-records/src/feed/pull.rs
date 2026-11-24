@@ -12,7 +12,9 @@ use crate::bundle::{
     check_signature, check_signed, open, sha256_hex, verify_at, Limits, Opened, SignatureStatus,
 };
 use crate::code::Code;
-use crate::keys::{decide_key_set, is_key_set_record, too_far_ahead, KeySetDecision, Pin, Trust};
+use crate::keys::{
+    decide_key_set, is_key_set_record, too_far_ahead, KeySetDecision, Pin, Revocation, Trust,
+};
 use crate::sign::Context;
 use crate::time::{self, Instant};
 
@@ -20,13 +22,15 @@ use crate::time::{self, Instant};
 ///
 /// A stateless reader's destination does the history checks itself, so each
 /// delivery carries what they need: the bundle's `published_at`, `sha256`
-/// (in `stream`) and signer (`signature`), and the index's `updated_at` and
-/// stream ids. When a key is revoked, the destination forgets what that key
-/// signed, as a reader with state does. The
-/// destination refuses an index older than the last it accepted and marks
-/// nothing withdrawn from it, ignores an unchanged hash, refuses a bundle
-/// older than the one it holds or as old with a different hash (a replay),
-/// and marks withdrawn the streams a newer index no longer lists.
+/// (in `stream`) and signer (`signature`), the index's `updated_at` and
+/// stream ids, and the poll's `revocations`. The destination refuses an
+/// index older than the last it accepted and marks nothing withdrawn from
+/// it, ignores an unchanged hash, refuses a bundle older than the one it
+/// holds or as old with a different hash (a replay), and marks withdrawn the
+/// streams a newer index no longer lists. For a revocation marked `held`,
+/// it clears what that key signed as a reader with state does, keeping the
+/// `published_at` and `updated_at` it holds as floors; for one not held, it
+/// changes nothing.
 #[derive(Clone, Debug)]
 pub struct Delivered {
     /// The stream's entry in the index.
@@ -44,6 +48,8 @@ pub struct Delivered {
     pub feed_updated_at: String,
     /// Every stream the index lists, in its order.
     pub stream_ids: Vec<String>,
+    /// The keys revoked on this poll, as [`PullReport::revocations`].
+    pub revocations: Vec<Revocation>,
 }
 
 /// What became of one stream in a poll.
@@ -56,9 +62,10 @@ pub enum StreamOutcome {
     /// In the reader's state and not in this index.
     Withdrawn,
     /// Refused with an outcome code. `revoked_key` before the index is
-    /// checked means the reader forgot the stream, because the key that
-    /// signed its last accepted bundle has been revoked; it is fetched and
-    /// checked anew on the next poll.
+    /// checked means the held key set revoked the key that signed the
+    /// stream's last accepted bundle: the reader cleared the stream's
+    /// `sha256` and signer, kept its `published_at` as a replay floor, and
+    /// fetches and checks it anew on the next poll.
     Refused(Code),
     /// Couldn't be fetched or delivered; it is tried again next poll.
     Failed(String),
@@ -73,7 +80,7 @@ pub enum IndexOutcome {
     NotModified,
     /// Refused with an outcome code. Nothing changed but what the key set
     /// steps change (a key set accepted, streams a revoked key signed
-    /// forgotten).
+    /// cleared).
     Refused(Code),
     /// Couldn't be fetched or read, or the publisher's key set couldn't be
     /// fetched and nothing else says whether it signs. Nothing changed but
@@ -89,12 +96,13 @@ pub enum KeySetOutcome {
     /// Accepted, and held from now on.
     Accepted,
     /// It adds these keys without a valid endorsement: they wait for a
-    /// person to approve them (`needs_approval`). Its revocations count.
+    /// person to approve them (`needs_approval`). Its revocations refuse
+    /// what the key signed on this poll, and change no state.
     Pending(Vec<Pin>),
     /// Refused with an outcome code (`bad_key_set`, `key_set_rollback` or
     /// `bad_endorsement`). The keys the reader trusts are as they were,
     /// except that a set that passed step 1 still has its revocations
-    /// honoured.
+    /// honoured on this poll, without changing any state.
     Refused(Code),
     /// Couldn't be fetched (a failure other than 404). The keys the reader
     /// trusts are as they were.
@@ -112,12 +120,12 @@ pub struct PullReport {
     pub key_set: KeySetOutcome,
     /// Each stream's outcome, by id: every stream the index lists and every
     /// one withdrawn, once the index is accepted; and, whatever happens to
-    /// the index, each stream forgotten because its signer was revoked
-    /// (`revoked_key`).
+    /// the index, each stream cleared because the held key set revoked its
+    /// signer (`revoked_key`).
     pub streams: BTreeMap<String, StreamOutcome>,
     /// The index's ETag, to send next poll. Given only when everything in
     /// this poll was accepted, unchanged or withdrawn, so that a stream that
-    /// failed or was refused (or forgotten) is tried again rather than
+    /// failed or was refused (or cleared) is tried again rather than
     /// skipped as unchanged.
     ///
     /// On `NotModified` it is the ETag the poll sent, so a caller that keeps
@@ -131,6 +139,12 @@ pub struct PullReport {
     /// Every stream the accepted index lists, in its order; empty unless the
     /// index was accepted.
     pub stream_ids: Vec<String>,
+    /// Every key the feed publisher's key sets revoke on this poll, whatever
+    /// happens to the index: the held set's (one accepted on this poll
+    /// included), marked `held`, and those of a served set the reader
+    /// doesn't hold, which are not. A stateless reader's destination clears
+    /// what a held revocation's key signed, and nothing for the others.
+    pub revocations: Vec<Revocation>,
 }
 
 /// How to poll.
@@ -171,6 +185,7 @@ impl PullReport {
             etag: None,
             index_updated_at: None,
             stream_ids: Vec::new(),
+            revocations: Vec::new(),
         }
     }
 
@@ -186,10 +201,14 @@ impl PullReport {
 /// First the keys, on every poll whatever happens to the index: the
 /// publisher's key set is fetched and decided on (§ Trust); an accepted one
 /// is held from then on, and the revocations of any served set that passed
-/// § Key sets step 1 are honoured, whatever its endorsement. A reader with
-/// state then forgets every stream whose last accepted bundle a revoked key
-/// signed (reporting it `revoked_key`), and the index watermark if a revoked
-/// key signed the last accepted index. A key set that can't be fetched
+/// § Key sets step 1 refuse what the key signed on this poll, whatever its
+/// endorsement. A reader with state then clears what a key the held set
+/// revokes signed: each stream whose last accepted bundle it signed loses
+/// its `sha256` and signer, keeps its `published_at` as a replay floor, and
+/// is reported `revoked_key`; the index loses its signer and keeps its
+/// `updated_at`. A revocation in a set the reader doesn't hold clears
+/// nothing, since anyone who controls the server can serve one with no key.
+/// A key set that can't be fetched
 /// leaves the keys as they were, unless nothing else (a pin, an approved
 /// key, a held set) says whether the publisher signs: then the poll fails.
 ///
@@ -272,37 +291,36 @@ pub fn pull(
         }
     }
 
-    // Keys, step 2: forget what a revoked key signed.
-    let mut forgot = false;
+    report.revocations = trust.revocations(&publisher);
+
+    // Keys, step 2: clear what a key the held set revokes signed. The floors
+    // (a stream's published_at, the index's updated_at) stay.
+    let mut cleared = false;
     if let Some(state) = state.as_deref_mut() {
         let revoked = |signer: &Option<Signer>| {
             signer
                 .as_ref()
-                .is_some_and(|s| trust.is_revoked(&s.publisher, &s.key))
+                .is_some_and(|s| trust.held_revokes(&s.publisher, &s.key))
         };
-        let gone: Vec<String> = state
-            .streams
-            .iter()
-            .filter(|(_, held)| revoked(&held.signer))
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in gone {
-            state.streams.remove(&id);
-            report
-                .streams
-                .insert(id, StreamOutcome::Refused(Code::RevokedKey));
-            forgot = true;
+        for (id, held) in state.streams.iter_mut() {
+            if revoked(&held.signer) {
+                held.sha256 = None;
+                held.signer = None;
+                report
+                    .streams
+                    .insert(id.clone(), StreamOutcome::Refused(Code::RevokedKey));
+                cleared = true;
+            }
         }
         if revoked(&state.feed_signer) {
-            state.feed_updated_at = None;
             state.feed_signer = None;
-            forgot = true;
+            cleared = true;
         }
     }
 
-    // 3. Fetch the index, both forms. After forgetting anything, the index
-    // is fetched whole.
-    let etag = if forgot {
+    // 3. Fetch the index, both forms. After clearing anything, the index is
+    // fetched whole.
+    let etag = if cleared {
         None
     } else {
         options.etag.as_deref()
@@ -412,12 +430,14 @@ pub fn pull(
         state.feed_signer = index_signer;
     }
 
-    // 9. Withdrawn: in the state, and not listed.
+    // 9. Withdrawn: in the state, and not listed. A stream cleared in step 2
+    // isn't decided again on this poll.
     if let Some(state) = state.as_deref_mut() {
         let withdrawn: Vec<String> = state
             .streams
             .keys()
             .filter(|id| !index.streams.iter().any(|s| &s.id == *id))
+            .filter(|id| !report.streams.contains_key(*id))
             .cloned()
             .collect();
         for id in withdrawn {
@@ -427,7 +447,7 @@ pub fn pull(
     }
 
     // 8, 10–13. Each stream; one failing doesn't stop the others. A stream
-    // forgotten in step 2 isn't checked again on this poll.
+    // cleared in step 2 isn't checked again on this poll.
     let stream_ids: Vec<String> = index.streams.iter().map(|s| s.id.clone()).collect();
     for entry in &index.streams {
         if report.streams.contains_key(&entry.id) {
@@ -446,6 +466,7 @@ pub fn pull(
                     published_at: published_at.clone(),
                     feed_updated_at: index.updated_at.clone(),
                     stream_ids: stream_ids.clone(),
+                    revocations: report.revocations.clone(),
                 };
                 match deliver(delivered) {
                     Ok(()) => {
@@ -453,7 +474,7 @@ pub fn pull(
                             state.streams.insert(
                                 entry.id.clone(),
                                 StreamState {
-                                    sha256: entry.sha256.clone(),
+                                    sha256: Some(entry.sha256.clone()),
                                     published_at,
                                     signer,
                                 },
@@ -468,7 +489,7 @@ pub fn pull(
         report.streams.insert(entry.id.clone(), outcome);
     }
 
-    let settled = !forgot
+    let settled = !cleared
         && report.streams.values().all(|o| {
             matches!(
                 o,
@@ -506,8 +527,8 @@ fn check_stream(
     now: Instant,
     options: &PullOptions,
 ) -> Result<Checked, StreamOutcome> {
-    // 8. Unchanged.
-    if held.is_some_and(|h| h.sha256 == entry.sha256) {
+    // 8. Unchanged. A stream a revocation cleared has no sha256 to match.
+    if held.is_some_and(|h| h.sha256.as_deref() == Some(entry.sha256.as_str())) {
         return Err(StreamOutcome::Unchanged);
     }
     // 10. Fetch, check the download, read the zip's entry names, check the
@@ -566,7 +587,8 @@ fn check_stream(
         if field("stream") != Some(entry.id.as_str()) {
             return refused(Code::WrongStream);
         }
-        // 12. Later than the last accepted; equal is a replay.
+        // 12. Later than the last accepted, which a revocation that cleared
+        // the stream keeps; equal is a replay.
         if let Some(held) = held {
             match time::parse(&held.published_at) {
                 Ok(last) if instant > last => {}

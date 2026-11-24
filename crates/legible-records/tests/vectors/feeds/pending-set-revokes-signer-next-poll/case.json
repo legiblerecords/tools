@@ -21,22 +21,68 @@
     "version": 1
   },
   "expect": {
-    "index": "ok",
+    "index": "stale_feed",
     "key_set": "accepted",
-    "streams": {
-      "access-reviews": "unchanged",
-      "incidents": "unchanged",
-      "policy-acknowledgments": "unchanged"
-    }
+    "state": {
+      "approved": [],
+      "feed_signer": {
+        "key": "2026-11",
+        "publisher": "acme.example"
+      },
+      "feed_updated_at": "2026-11-24T10:00:00Z",
+      "key_sets": {
+        "acme.example": {
+          "$type": "org.legiblerecords.keys",
+          "keys": [
+            {
+              "alg": "ed25519",
+              "created_at": "2026-11-24T00:00:00Z",
+              "id": "2026-11",
+              "public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg"
+            }
+          ],
+          "publisher": "acme.example",
+          "updated_at": "2026-11-24T00:00:00Z",
+          "version": 1
+        }
+      },
+      "streams": {
+        "access-reviews": {
+          "published_at": "2026-11-24T10:00:00Z",
+          "sha256": "3b3c44d605d3771889befdf4801924c40a0396b5271f8d44080f23a7303cb492",
+          "signer": {
+            "key": "2026-11",
+            "publisher": "acme.example"
+          }
+        },
+        "incidents": {
+          "published_at": "2026-11-24T10:00:00Z",
+          "sha256": "ff76ce16d62aa68247b53d9cc0cb4d1fe78eb146ef521945635abc6d64d75755",
+          "signer": {
+            "key": "2026-11",
+            "publisher": "acme.example"
+          }
+        },
+        "policy-acknowledgments": {
+          "published_at": "2026-11-24T10:00:00Z",
+          "sha256": "fc89dead8d7905bd4dae465c1ae3101cb301ff104878066cc91f6a6520304c52",
+          "signer": {
+            "key": "2026-11",
+            "publisher": "acme.example"
+          }
+        }
+      }
+    },
+    "streams": {}
   },
-  "name": "revoked-key-clears-watermark",
+  "name": "pending-set-revokes-signer-next-poll",
   "state": {
     "approved": [],
     "feed_signer": {
-      "key": "2025-06",
+      "key": "2026-11",
       "publisher": "acme.example"
     },
-    "feed_updated_at": "2026-12-01T12:00:00Z",
+    "feed_updated_at": "2026-11-24T10:00:00Z",
     "key_sets": {
       "acme.example": {
         "$type": "org.legiblerecords.keys",
@@ -46,16 +92,10 @@
             "created_at": "2026-11-24T00:00:00Z",
             "id": "2026-11",
             "public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg"
-          },
-          {
-            "alg": "ed25519",
-            "created_at": "2025-06-01T00:00:00Z",
-            "id": "2025-06",
-            "public_key": "Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc"
           }
         ],
         "publisher": "acme.example",
-        "updated_at": "2026-06-02T00:00:00Z",
+        "updated_at": "2026-11-24T00:00:00Z",
         "version": 1
       }
     },

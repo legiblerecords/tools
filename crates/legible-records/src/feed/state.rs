@@ -31,7 +31,11 @@ pub struct Signer {
 /// A stream's last accepted bundle.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamState {
-    pub sha256: String,
+    /// The bundle's `sha256`, or `None` once a revocation in the held key
+    /// set cleared the stream: it is then fetched and checked anew.
+    pub sha256: Option<String>,
+    /// The bundle's `published_at`. A revocation keeps it, as the floor a
+    /// replay is refused against, for the rest of the stream's life.
     pub published_at: String,
     /// Who signed it, or `None` when it was unsigned (or the state file
     /// predates signers).
@@ -138,16 +142,27 @@ impl ReaderState {
                 let stream = stream
                     .as_object()
                     .ok_or_else(|| at("must be an object".to_owned()))?;
-                let sha256 = string(stream, "sha256").map_err(at)?;
-                if !is_sha256(sha256) {
+                // null: a revocation cleared the stream, and kept only its
+                // published_at.
+                let sha256 = match stream.get("sha256") {
+                    Some(Value::Null) => None,
+                    _ => Some(string(stream, "sha256").map_err(at)?),
+                };
+                if sha256.is_some_and(|s| !is_sha256(s)) {
                     return Err(at("sha256 is not 64 lowercase hex digits".to_owned()));
+                }
+                let signer = signer(stream, "signer").map_err(at)?;
+                if sha256.is_none() && signer.is_some() {
+                    return Err(at(
+                        "a stream a revocation cleared has sha256 and signer null".to_owned(),
+                    ));
                 }
                 streams.insert(
                     id.clone(),
                     StreamState {
-                        sha256: sha256.to_owned(),
+                        sha256: sha256.map(str::to_owned),
                         published_at: instant(stream, "published_at").map_err(at)?,
-                        signer: signer(stream, "signer").map_err(at)?,
+                        signer,
                     },
                 );
             }
