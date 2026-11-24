@@ -1,7 +1,7 @@
 //! Record sets (spec/records.md § Record sets): many records of one type in
 //! one NDJSON file, `records/<kind>.ndjson`.
 //!
-//! [`write`] makes one; [`Reader`] checks one as a stream, yielding each
+//! [`write()`] makes one; [`Reader`] checks one as a stream, yielding each
 //! record as it goes and deciding at [`Reader::finish`]; [`check`] reads one
 //! held in memory. Every problem names the line it is on.
 

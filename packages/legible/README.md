@@ -78,8 +78,10 @@ const result = expand(text, "risk-appetite", { base: "https://monorail.tech/sche
 | `checkCompat(old, new)` | `[{ pointer, message }]`, empty when compatible |
 | `parseYaml(text)` | `{ ok: true, value }` or `{ ok: false, error: { reason, line, col, message } }` |
 | `commonSchema()` | `org.legiblerecords.common` version 1 |
-| `new BundleBuilder()` | `.add(name, bytes)` each file, then `.finish(schemas?, producedBy?)`, which returns a `PackedBundle` with `.zip()`, `.manifest()` and `.attachments()`, or throws with every problem, one per line |
+| `new BundleBuilder()` | `.add(name, bytes)` each file (a `.ndjson` file is a record set and is kept as it is), optionally `.setKinds([kind, …])` or `.noSets()` (by default a kind with more than 1,000 records of one version becomes a record set), then `.finish(schemas?, producedBy?)`, which returns a `PackedBundle` with `.zip()`, `.manifest()` and `.attachments()`, or throws with every problem, one per line |
 | `Bundle.open(bytes)` | a `Bundle`, with `.manifest()`, `.manifestBytes()` and `.signature()` (as stored; `undefined` when unsigned), `.paths()`, `.file(path)` and `.verify(schemas?, nowMillis?)` → `{ problems, uncheckedTypes }` (a `published_at` more than 24 hours after `nowMillis`, default `Date.now()`, is a problem); throws for an unsafe, repeated or oversized zip entry |
+| `bundle.recordSets()` | `[{ path, recordType, recordVersion, count }]` for the bundle's record sets (`records/<kind>.ndjson`) |
+| `recordSet(bytes, { recordType, recordVersion, count, sha256 })` | a record set's records, after checking every line, the count and the hash; throws with the first problem, naming its line |
 | `bundle.verifySignature({ pins?, keySets?, expectedPublisher? })` | `{ status: "verified", publisher, key }` or `{ status: "unverified" }`. `pins` are `[{ publisher, id, alg?, publicKey }]` (canonical base64url), `keySets` are `Uint8Array`s of a publisher's keys.json as stored. Throws an `Error` whose `message` is the outcome code, such as `unknown_key` or `bad_signature` |
 | `parsePin(text)` | `{ publisher, id, alg, publicKey }` from `<publisher>/<id>=<public_key>`, as `--pin` takes it; throws with what is wrong |
 | `checkKeySet(bytes)` | the publisher of a key set (keys.json as stored); throws `bad_key_set` |

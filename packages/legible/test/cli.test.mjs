@@ -290,3 +290,25 @@ test("unpack keeps a signed bundle's manifest and signature as stored; --key-set
   assert.equal(stdin.status, 2);
   assert.match(stdin.stderr, /-i -/);
 });
+
+test("pack --set writes a record set, --no-sets writes files, and both together are refused", () => {
+  const dir = mkdtempSync(join(tmpdir(), "legible-sets-"));
+  mkdirSync(join(dir, "in"));
+  for (const id of ["a-1", "a-2"]) {
+    writeFileSync(join(dir, "in", `${id}.json`), JSON.stringify({ $type: "example.alert", version: 1, id }));
+  }
+  const set = run(dir, ["bundle", "pack", "in", "--set", "alert", "-o", "set.zip"]);
+  assert.equal(set.status, 0, set.stderr);
+  const verified = run(dir, ["bundle", "verify", "set.zip"]);
+  assert.equal(verified.status, 0, verified.stdout + verified.stderr);
+  const unpacked = run(dir, ["bundle", "unpack", "set.zip", "-d", "out"]);
+  assert.equal(unpacked.status, 0, unpacked.stdout + unpacked.stderr);
+  assert.ok(existsSync(join(dir, "out", "records", "alert.ndjson")));
+  const files = run(dir, ["bundle", "pack", "in", "--no-sets", "-o", "files.zip"]);
+  assert.equal(files.status, 0, files.stderr);
+  const out2 = run(dir, ["bundle", "unpack", "files.zip", "-d", "out2"]);
+  assert.equal(out2.status, 0);
+  assert.ok(existsSync(join(dir, "out2", "records", "alert", "a-1.json")));
+  const both = run(dir, ["bundle", "pack", "in", "--set", "alert", "--no-sets", "-o", "x.zip"]);
+  assert.equal(both.status, 2, both.stderr);
+});

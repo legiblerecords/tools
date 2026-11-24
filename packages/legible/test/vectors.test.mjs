@@ -143,3 +143,29 @@ test("generateKey and signBundle", () => {
   assert.deepEqual(opened.verifySignature({ pins }), { status: "verified", publisher: "acme.example", key: "2026-11" });
   assert.throws(() => legible.signBundle(signed, secretKey), /already signed/);
 });
+
+test("record sets: recordSet and Bundle.recordSets", () => {
+  const dir = new URL("../../../crates/legible-records/tests/vectors/bundles/", import.meta.url);
+  const valid = legible.Bundle.open(readFileSync(new URL("record-set-valid/bundle.zip", dir)));
+  const sets = valid.recordSets();
+  assert.deepEqual(sets, [{ path: "records/alert.ndjson", recordType: "example.alert", recordVersion: 1, count: 3 }]);
+  const entry = valid.manifest().files.find((f) => f.path === sets[0].path);
+  const records = legible.recordSet(valid.file(sets[0].path), {
+    recordType: sets[0].recordType,
+    recordVersion: sets[0].recordVersion,
+    count: sets[0].count,
+    sha256: entry.sha256,
+  });
+  assert.deepEqual(records.map((r) => r.id), ["api-12", "api-7", "web-3"]);
+  valid.free();
+
+  const bad = legible.Bundle.open(readFileSync(new URL("unsorted-lines/bundle.zip", dir)));
+  const badEntry = bad.manifest().files.find((f) => f.path === "records/alert.ndjson");
+  assert.throws(
+    () => legible.recordSet(bad.file("records/alert.ndjson"), {
+      recordType: "example.alert", recordVersion: 1, count: badEntry.count, sha256: badEntry.sha256,
+    }),
+    /line 2/,
+  );
+  bad.free();
+});

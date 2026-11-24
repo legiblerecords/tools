@@ -2195,3 +2195,132 @@ mod feed_read {
         assert!(text(&result.stderr).contains("loopback"), "{result:?}");
     }
 }
+
+mod record_sets {
+    use super::*;
+
+    fn alert(id: &str) -> String {
+        format!(r#"{{"$type":"example.alert","id":"{id}","severity":"high","version":1}}"#)
+    }
+
+    fn write_alerts(dir: &Temp, ids: &[&str]) {
+        std::fs::create_dir_all(dir.path("in")).unwrap();
+        for id in ids {
+            std::fs::write(dir.path(&format!("in/{id}.json")), alert(id)).unwrap();
+        }
+    }
+
+    #[test]
+    fn pack_ndjson_input_then_verify() {
+        let dir = Temp::new("set-ndjson");
+        let set = format!("{}\n{}\n", alert("a-1"), alert("a-2"));
+        std::fs::write(dir.path("alert.ndjson"), &set).unwrap();
+        let packed = legible(&[
+            arg("bundle"),
+            arg("pack"),
+            &dir.path("alert.ndjson"),
+            arg("-o"),
+            &dir.path("b.zip"),
+        ]);
+        assert_eq!(packed.status.code(), Some(0), "{packed:?}");
+        let verified = legible(&[arg("bundle"), arg("verify"), &dir.path("b.zip")]);
+        assert_eq!(verified.status.code(), Some(0), "{verified:?}");
+        let unpacked = legible(&[
+            arg("bundle"),
+            arg("unpack"),
+            &dir.path("b.zip"),
+            arg("-d"),
+            &dir.path("out"),
+        ]);
+        assert_eq!(unpacked.status.code(), Some(0), "{unpacked:?}");
+        assert_eq!(
+            std::fs::read(dir.path("out/records/alert.ndjson")).unwrap(),
+            set.as_bytes(),
+            "unpack writes the set byte for byte"
+        );
+    }
+
+    #[test]
+    fn pack_set_flag_writes_set_and_no_sets_writes_files() {
+        let dir = Temp::new("set-flag");
+        write_alerts(&dir, &["a-1", "a-2"]);
+        let packed = legible(&[
+            arg("bundle"),
+            arg("pack"),
+            &dir.path("in"),
+            arg("--set"),
+            arg("alert"),
+            arg("-o"),
+            &dir.path("set.zip"),
+        ]);
+        assert_eq!(packed.status.code(), Some(0), "{packed:?}");
+        let opened = legible_records::bundle::open(
+            &std::fs::read(dir.path("set.zip")).unwrap(),
+            Default::default(),
+        )
+        .unwrap();
+        assert!(opened.files.contains_key("records/alert.ndjson"));
+        let plain = legible(&[
+            arg("bundle"),
+            arg("pack"),
+            &dir.path("in"),
+            arg("--no-sets"),
+            arg("-o"),
+            &dir.path("files.zip"),
+        ]);
+        assert_eq!(plain.status.code(), Some(0), "{plain:?}");
+        let opened = legible_records::bundle::open(
+            &std::fs::read(dir.path("files.zip")).unwrap(),
+            Default::default(),
+        )
+        .unwrap();
+        assert!(opened.files.contains_key("records/alert/a-1.json"));
+        let both = legible(&[
+            arg("bundle"),
+            arg("pack"),
+            &dir.path("in"),
+            arg("--set"),
+            arg("alert"),
+            arg("--no-sets"),
+            arg("-o"),
+            &dir.path("x.zip"),
+        ]);
+        assert_eq!(both.status.code(), Some(2), "{both:?}");
+    }
+
+    #[test]
+    fn pack_bad_ndjson_exits_1_naming_line() {
+        let dir = Temp::new("set-bad");
+        let unsorted = format!("{}\n{}\n", alert("b"), alert("a"));
+        std::fs::write(dir.path("alert.ndjson"), unsorted).unwrap();
+        let packed = legible(&[
+            arg("bundle"),
+            arg("pack"),
+            &dir.path("alert.ndjson"),
+            arg("-o"),
+            &dir.path("b.zip"),
+        ]);
+        assert_eq!(packed.status.code(), Some(1), "{packed:?}");
+        assert!(
+            String::from_utf8_lossy(&packed.stderr).contains("line 2"),
+            "{packed:?}"
+        );
+    }
+
+    #[test]
+    fn verify_bad_set_exits_1_naming_line() {
+        let dir = Temp::new("set-verify-bad");
+        let bundle = format!(
+            "{}/../legible-records/tests/vectors/bundles/unsorted-lines/bundle.zip",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let verified = legible(&[arg("bundle"), arg("verify"), Path::new(&bundle)]);
+        drop(dir);
+        assert_eq!(verified.status.code(), Some(1), "{verified:?}");
+        let said = String::from_utf8_lossy(&verified.stdout);
+        assert!(
+            said.contains("records/alert.ndjson") && said.contains("line 2"),
+            "{said}"
+        );
+    }
+}
