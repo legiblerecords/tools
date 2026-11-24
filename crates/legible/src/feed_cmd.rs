@@ -23,7 +23,7 @@ use legible_records::feed::{
 };
 use legible_records::keys::parse_pin_text;
 use legible_records::net::{source_with_limits, HttpsKeySource};
-use legible_records::sign::{self, is_publisher, Context, SigningKey};
+use legible_records::sign::{self, is_publisher, Context, SignatureFile, SigningKey};
 use legible_records::time::{self, Instant};
 use serde_json::Value;
 
@@ -33,15 +33,22 @@ use crate::Stop;
 pub enum FeedCommand {
     /// Publish a stream of a feed into a directory laid out as the feed's base URL: pack the
     /// inputs into a signed (with -k) bundle, write bundles/<sha256>.zip, then feed.json and
-    /// feed.sig. A feed is plain, or encrypted when -r is given, never both. Never deploys:
-    /// it writes only the directory given.
+    /// feed.sig. A feed is plain, or encrypted when -r is given, never both. With -k, the
+    /// existing index is built on only if feed.sig is this key's signature over it (else
+    /// --rebuild). Never deploys: it writes only the directory given, which must be kept
+    /// where whoever can write the feed's storage can't change it.
     Publish(PublishArgs),
-    /// Poll a feed from a connection file and report each stream's outcome, without keeping
-    /// anything: nothing is written or delivered. Exit 0 when everything is accepted, 1 when
-    /// anything is refused or a key waits for approval, 2 when the feed couldn't be reached.
+    /// Poll a feed from a connection file and report each stream's outcome, statelessly:
+    /// nothing is written or delivered, and the history checks (stale_feed, replay) need a
+    /// state, so they aren't made. Exit 0 when everything is accepted; 1 when anything is
+    /// refused, the key set is refused (keys: <code>) or a key waits for approval; 2 when the
+    /// feed couldn't be read, or its key set couldn't be fetched and nothing else says whether
+    /// the publisher signs. A key set that couldn't be fetched while pins or a held set can
+    /// still check signatures is reported on stderr, and is not on its own a failure.
     Check(ReadArgs),
     /// Poll a feed from a connection file, write each accepted bundle (decrypted) to
     /// <out>/<stream>/<published_at>-<hash>.zip, and keep what the reader remembers in --state.
+    /// Exit status as for check.
     Pull(PullArgs),
 }
 
@@ -115,6 +122,11 @@ pub struct PublishArgs {
     /// Remove the stream from the feed instead of publishing it.
     #[arg(long, conflicts_with = "inputs")]
     withdraw: bool,
+    /// Start the index again from the stream on this command line only, dropping the
+    /// others: for when the existing feed.sig is missing or isn't this key's signature
+    /// over the index, so the index can't be trusted.
+    #[arg(long, conflicts_with = "withdraw")]
+    rebuild: bool,
     /// Record files (.json with $type and version) and attachments, or directories to
     /// publish every file in.
     #[arg(required_unless_present = "withdraw")]
@@ -125,9 +137,10 @@ fn fail<T>(message: String) -> Result<T, Stop> {
     Err(Stop::Failed(message))
 }
 
-/// The feed as it already is in the directory.
+/// The feed as it already is in the directory: its index, unless it is
+/// being rebuilt, and its mode.
 struct Existing {
-    feed: Feed,
+    feed: Option<Feed>,
     encrypted: bool,
 }
 
@@ -173,9 +186,9 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), Stop> {
     })
 }
 
-/// The index already in `dir`, if any. An index that can't be read is an
-/// error, never a reason to start a new one over it.
-fn read_existing(dir: &Path, identity: Option<&Path>) -> Result<Option<Existing>, Stop> {
+/// The index file already in `dir`, as stored: its path, bytes, and whether
+/// it is encrypted.
+fn stored_index(dir: &Path) -> Result<Option<(PathBuf, Vec<u8>, bool)>, Stop> {
     let plain = dir.join("feed.json");
     let sealed = dir.join("feed.json.age");
     let (path, bytes, encrypted) = match (read_optional(&plain)?, read_optional(&sealed)?) {
@@ -189,13 +202,35 @@ fn read_existing(dir: &Path, identity: Option<&Path>) -> Result<Option<Existing>
         (Some(bytes), None) => (plain, bytes, false),
         (None, Some(bytes)) => (sealed, bytes, true),
     };
-    let too_big = |bytes: &[u8]| bytes.len() as u64 > MAX_INDEX_BYTES;
-    if too_big(&bytes) {
+    if bytes.len() as u64 > MAX_INDEX_BYTES {
         return fail(format!(
             "{}: larger than a feed index may be",
             path.display()
         ));
     }
+    Ok(Some((path, bytes, encrypted)))
+}
+
+/// Whether `dir`'s `feed.sig` is `key`'s signature over the stored index:
+/// what lets a publisher build on an index that whoever can write the
+/// directory might have changed.
+fn index_signed_by(dir: &Path, stored: &[u8], key: &SigningKey) -> Result<bool, Stop> {
+    let Some(bytes) = read_optional(&dir.join("feed.sig"))? else {
+        return Ok(false);
+    };
+    Ok(SignatureFile::parse(&bytes)
+        .and_then(|sig| sign::verify(&key.public(), Context::Feed, stored, &sig))
+        .is_ok())
+}
+
+/// The existing index, decrypted and read. An index that can't be read is
+/// an error, never a reason to start a new one over it.
+fn read_existing(
+    path: &Path,
+    bytes: Vec<u8>,
+    encrypted: bool,
+    identity: Option<&Path>,
+) -> Result<Feed, Stop> {
     let bytes = if encrypted {
         let Some(identity) = identity else {
             return fail(format!(
@@ -220,7 +255,7 @@ fn read_existing(dir: &Path, identity: Option<&Path>) -> Result<Option<Existing>
     };
     let feed = parse_feed(&bytes).map_err(unreadable)?;
     check_bundle_paths(&feed, encrypted).map_err(unreadable)?;
-    Ok(Some(Existing { feed, encrypted }))
+    Ok(feed)
 }
 
 /// The `$type`s of the inputs that are records.
@@ -306,21 +341,67 @@ fn publish(args: PublishArgs) -> Result<(), Stop> {
         ));
     }
 
-    // What is there now.
-    let existing = read_existing(&args.dir, args.identity.as_deref())?;
+    // The publish state is read before anything is written, so a state file
+    // that can't be read stops the publish rather than the clean-up after it.
+    let mut publish_state = match &args.state {
+        Some(path) => Some(match read_optional(path)? {
+            Some(bytes) => PublishState::parse(&bytes)
+                .map_err(|e| Stop::Failed(format!("{}: {e}", path.display())))?,
+            None => PublishState::default(),
+        }),
+        None => None,
+    };
+
+    // What is there now. With -k, the existing index is built on only if
+    // its feed.sig is this key's signature over it.
+    let existing = match stored_index(&args.dir)? {
+        None => None,
+        Some((path, bytes, encrypted)) => {
+            let trusted = match &key {
+                Some(key) => index_signed_by(&args.dir, &bytes, key)?,
+                None => true,
+            };
+            if !trusted && !args.rebuild {
+                return fail(format!(
+                    "{}: feed.sig is missing or isn't this key's signature over {}, so the index may have been changed by whoever can write the directory; give --rebuild to start the index again from the streams on this command line only",
+                    args.dir.display(),
+                    path.display()
+                ));
+            }
+            if args.rebuild {
+                eprintln!(
+                    "--rebuild: the new index lists only {}; the streams in the existing index are dropped",
+                    args.stream
+                );
+                Some(Existing {
+                    feed: None,
+                    encrypted,
+                })
+            } else {
+                let feed = read_existing(&path, bytes, encrypted, args.identity.as_deref())?;
+                Some(Existing {
+                    feed: Some(feed),
+                    encrypted,
+                })
+            }
+        }
+    };
+    let existing_feed = existing.as_ref().and_then(|e| e.feed.as_ref());
     let encrypted = match &existing {
         Some(existing) => existing.encrypted,
         None => !args.recipients.is_empty(),
     };
-    if let Some(existing) = &existing {
-        if existing.feed.id != args.feed {
+    if let Some(feed) = existing_feed {
+        if feed.id != args.feed {
             return fail(format!(
                 "{}: holds the feed {}, not {}",
                 args.dir.display(),
-                existing.feed.id,
+                feed.id,
                 args.feed
             ));
         }
+    }
+    if let Some(existing) = &existing {
         match (existing.encrypted, args.recipients.is_empty()) {
             (false, false) => {
                 return fail(format!(
@@ -345,14 +426,23 @@ fn publish(args: PublishArgs) -> Result<(), Stop> {
     }
 
     let now = time::now();
-    let previous_index = existing.as_ref().map(|e| e.feed.updated_at.as_str());
-    let previous_stream = existing
+    let previous_index = existing_feed.map(|f| f.updated_at.as_str());
+    let previous_stream =
+        existing_feed.and_then(|f| f.streams.iter().find(|s| s.id == args.stream));
+    // The stream's last published_at: the index's, or the publish state's
+    // high-water mark, which outlives a withdraw or a rebuild.
+    let high_water = publish_state
         .as_ref()
-        .and_then(|e| e.feed.streams.iter().find(|s| s.id == args.stream));
-    let mut streams: Vec<StreamEntry> = existing
-        .as_ref()
-        .map(|e| e.feed.streams.clone())
-        .unwrap_or_default();
+        .and_then(|state| state.published_at.get(&args.stream))
+        .map(String::as_str);
+    let previous_published_at = match (previous_stream.map(|s| s.published_at.clone()), high_water)
+    {
+        (Some(listed), Some(mark)) => Some(later_of(listed, mark)),
+        (Some(listed), None) => Some(listed),
+        (None, mark) => mark.map(str::to_owned),
+    };
+    let mut streams: Vec<StreamEntry> =
+        existing_feed.map(|f| f.streams.clone()).unwrap_or_default();
     let mut updated_at = next_published_at(now, previous_index);
 
     // The new bundle, or the stream gone.
@@ -366,7 +456,7 @@ fn publish(args: PublishArgs) -> Result<(), Stop> {
         }
         streams.retain(|s| s.id != args.stream);
     } else {
-        let published_at = next_published_at(now, previous_stream.map(|s| s.published_at.as_str()));
+        let published_at = next_published_at(now, previous_published_at.as_deref());
         updated_at = later_of(updated_at, &published_at);
         let mut inputs = Vec::new();
         let mut skipped = Vec::new();
@@ -477,11 +567,17 @@ fn publish(args: PublishArgs) -> Result<(), Stop> {
         None => println!("withdrew {} (updated_at {updated_at})", args.stream),
     }
 
-    if let Some(state) = &args.state {
+    if let (Some(path), Some(mut state)) = (&args.state, publish_state.take()) {
+        if let Some(entry) = feed.streams.iter().find(|s| s.id == args.stream) {
+            state
+                .published_at
+                .insert(args.stream.clone(), entry.published_at.clone());
+        }
         collect_garbage(
             &args.dir,
-            state,
-            existing.as_ref().map(|e| e.feed.streams.as_slice()),
+            path,
+            &mut state,
+            existing_feed.map(|f| f.streams.as_slice()),
             &feed,
             now,
             grace,
@@ -497,16 +593,12 @@ fn publish(args: PublishArgs) -> Result<(), Stop> {
 fn collect_garbage(
     dir: &Path,
     state_path: &Path,
+    state: &mut PublishState,
     old_streams: Option<&[StreamEntry]>,
     feed: &Feed,
     now: Instant,
     grace: Duration,
 ) -> Result<(), Stop> {
-    let mut state = match read_optional(state_path)? {
-        Some(bytes) => PublishState::parse(&bytes)
-            .map_err(|e| Stop::Failed(format!("{}: {e}", state_path.display())))?,
-        None => PublishState::default(),
-    };
     let referenced: BTreeSet<&str> = feed.streams.iter().map(|s| s.bundle.as_str()).collect();
     for old in old_streams.unwrap_or_default() {
         if !referenced.contains(old.bundle.as_str()) {
@@ -519,7 +611,7 @@ fn collect_garbage(
     state
         .unreferenced_since
         .retain(|path, _| !referenced.contains(path.as_str()));
-    for path in collectable(&state, now, grace) {
+    for path in collectable(state, now, grace) {
         let hash = path
             .strip_prefix("bundles/")
             .and_then(|rest| rest.strip_suffix(".zip.age").or(rest.strip_suffix(".zip")));

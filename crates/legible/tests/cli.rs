@@ -786,6 +786,205 @@ mod feed_publish {
     }
 
     #[test]
+    fn publish_builds_only_on_an_index_its_key_signed() {
+        let s = setup("t-i3-verify");
+        let state_file = s.temp.path("publish-state.json");
+        let signed = [arg("-k"), &s.key, arg("--state"), &state_file];
+        assert!(publish(&s, "one", &signed).status.success());
+        assert!(publish(&s, "two", &signed).status.success());
+
+        // Whoever can write the directory changes the index: refused, and
+        // nothing is written.
+        let index = s.feed_dir.join("feed.json");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&index).unwrap()).unwrap();
+        value["audience"] = serde_json::json!("Someone else");
+        let tampered = serde_json::to_vec_pretty(&value).unwrap();
+        std::fs::write(&index, &tampered).unwrap();
+        let before = bundles(&s);
+        let refused = publish(&s, "one", &signed);
+        assert_eq!(refused.status.code(), Some(2), "{refused:?}");
+        assert!(text(&refused.stderr).contains("feed.sig"), "{refused:?}");
+        assert_eq!(std::fs::read(&index).unwrap(), tampered);
+        assert_eq!(bundles(&s), before);
+
+        // No feed.sig at all: refused too.
+        let sig = std::fs::read(s.feed_dir.join("feed.sig")).unwrap();
+        std::fs::remove_file(s.feed_dir.join("feed.sig")).unwrap();
+        assert_eq!(publish(&s, "one", &signed).status.code(), Some(2));
+        std::fs::write(s.feed_dir.join("feed.sig"), sig).unwrap();
+
+        // --rebuild starts the index from this stream only, and says so.
+        let mut rebuild = signed.to_vec();
+        rebuild.push(arg("--rebuild"));
+        let rebuilt = publish(&s, "one", &rebuild);
+        assert!(rebuilt.status.success(), "{rebuilt:?}");
+        assert!(text(&rebuilt.stderr).contains("--rebuild"), "{rebuilt:?}");
+        let feed = parse_feed(&std::fs::read(&index).unwrap()).unwrap();
+        assert_eq!(feed.streams.len(), 1);
+        assert_eq!(feed.streams[0].id, "one");
+        assert_eq!(feed.audience, "Monorail, for Track");
+        let report = poll(&s, true, &mut ReaderState::default(), None);
+        assert_eq!(report.index, IndexOutcome::Accepted, "{report:?}");
+        assert_eq!(report.streams["one"], StreamOutcome::Accepted);
+
+        // An unreadable --state stops the publish before anything is written.
+        std::fs::write(&state_file, b"not a state file").unwrap();
+        let before = (std::fs::read(&index).unwrap(), bundles(&s));
+        let bad_state = publish(&s, "one", &signed);
+        assert_eq!(bad_state.status.code(), Some(2), "{bad_state:?}");
+        assert_eq!((std::fs::read(&index).unwrap(), bundles(&s)), before);
+    }
+
+    #[test]
+    fn published_at_high_water_mark_outlives_a_withdraw() {
+        let s = setup("t-hwm");
+        let state_file = s.temp.path("publish-state.json");
+        let signed = [arg("-k"), &s.key, arg("--state"), &state_file];
+        assert!(publish(&s, "main", &signed).status.success());
+        assert!(publish(&s, "other", &signed).status.success());
+        let mut withdraw = signed.to_vec();
+        withdraw.push(arg("--withdraw"));
+        assert!(publish(&s, "main", &withdraw).status.success());
+        // The mark stays after the withdraw. Move it ahead of the clock (within
+        // the skew a reader allows), as another publisher host's clock might.
+        let ahead = time::format(time::now().plus_millis(3_600_000));
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&state_file).unwrap()).unwrap();
+        assert!(value["published_at"]["main"].is_string(), "{value}");
+        value["published_at"]["main"] = serde_json::json!(ahead);
+        std::fs::write(&state_file, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(publish(&s, "main", &signed).status.success());
+        let feed = parse_feed(&std::fs::read(s.feed_dir.join("feed.json")).unwrap()).unwrap();
+        let main = feed.streams.iter().find(|s| s.id == "main").unwrap();
+        assert!(
+            time::parse(&main.published_at).unwrap() > time::parse(&ahead).unwrap(),
+            "{} after {ahead}",
+            main.published_at
+        );
+    }
+
+    /// Adds a stream to an unsigned feed's index by hand, pointing at the
+    /// bundle `like` points at.
+    fn add_stream_like(s: &Setup, id: &str, like: &str) {
+        let index = s.feed_dir.join("feed.json");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&index).unwrap()).unwrap();
+        let streams = value["streams"].as_array_mut().unwrap();
+        let mut copy = streams.iter().find(|e| e["id"] == like).unwrap().clone();
+        copy["id"] = serde_json::json!(id);
+        streams.push(copy);
+        std::fs::write(&index, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    }
+
+    fn unreferenced(state_file: &Path) -> Vec<String> {
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(state_file).unwrap()).unwrap();
+        value["unreferenced_since"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn gc_keeps_a_bundle_another_stream_shares_or_points_at_again() {
+        let s = setup("t-gc-shared");
+        let state_file = s.temp.path("publish-state.json");
+        let unsigned = [
+            arg("--publisher"),
+            arg("acme.example"),
+            arg("--state"),
+            &state_file,
+        ];
+        assert!(publish(&s, "a", &unsigned).status.success());
+        let shared = format!("bundles/{}", bundles(&s)[0]);
+        add_stream_like(&s, "b", "a");
+        let mut withdraw = unsigned.to_vec();
+        withdraw.push(arg("--withdraw"));
+
+        // Withdrawing a leaves b pointing at the bundle: it isn't unreferenced.
+        assert!(publish(&s, "a", &withdraw).status.success());
+        assert!(!unreferenced(&state_file).contains(&shared));
+        // Withdrawing b too makes it unreferenced.
+        assert!(publish(&s, "b", &withdraw).status.success());
+        assert_eq!(unreferenced(&state_file), std::slice::from_ref(&shared));
+
+        // A stream points at it again within the grace: it is forgotten, and
+        // even an old date can't get it deleted.
+        add_stream_like_bundle(&s, "c", &shared);
+        assert!(publish(&s, "d", &unsigned).status.success());
+        assert!(!unreferenced(&state_file).contains(&shared));
+        assert!(s.feed_dir.join(&shared).exists());
+    }
+
+    /// Adds a stream to an unsigned feed's index by hand, pointing at `bundle`.
+    fn add_stream_like_bundle(s: &Setup, id: &str, bundle: &str) {
+        let index = s.feed_dir.join("feed.json");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&index).unwrap()).unwrap();
+        let sha256 = bundle
+            .trim_start_matches("bundles/")
+            .trim_end_matches(".zip")
+            .to_owned();
+        value["streams"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": id, "title": "Shared", "record_types": [], "bundle": bundle,
+                "sha256": sha256, "published_at": "2026-11-24T10:00:00Z",
+            }));
+        std::fs::write(&index, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn gc_deletes_after_a_withdraw_and_a_feed_can_have_no_streams() {
+        let s = setup("t-gc-withdraw");
+        let state_file = s.temp.path("publish-state.json");
+        let signed = [arg("-k"), &s.key, arg("--state"), &state_file];
+        assert!(publish(&s, "x", &signed).status.success());
+        assert!(publish(&s, "y", &signed).status.success());
+        let mut withdraw = signed.to_vec();
+        withdraw.push(arg("--withdraw"));
+        let feed = parse_feed(&std::fs::read(s.feed_dir.join("feed.json")).unwrap()).unwrap();
+        let bundle_of = |id: &str| {
+            feed.streams
+                .iter()
+                .find(|e| e.id == id)
+                .unwrap()
+                .bundle
+                .clone()
+        };
+        let (x, y) = (bundle_of("x"), bundle_of("y"));
+
+        assert!(publish(&s, "x", &withdraw).status.success());
+        assert_eq!(unreferenced(&state_file), std::slice::from_ref(&x));
+        // Past the grace, the next publish deletes it: here, withdrawing the
+        // last stream, which leaves a feed with no streams.
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&state_file).unwrap()).unwrap();
+        value["unreferenced_since"][&x] = serde_json::json!("2020-01-01T00:00:00.000Z");
+        std::fs::write(&state_file, serde_json::to_vec(&value).unwrap()).unwrap();
+        let last = publish(&s, "y", &withdraw);
+        assert!(last.status.success(), "{last:?}");
+        assert!(!s.feed_dir.join(&x).exists());
+        assert!(s.feed_dir.join(&y).exists(), "within its grace");
+        assert_eq!(unreferenced(&state_file), [y]);
+
+        let empty = parse_feed(&std::fs::read(s.feed_dir.join("feed.json")).unwrap()).unwrap();
+        assert!(empty.streams.is_empty());
+        let mut state = ReaderState::default();
+        let report = poll(&s, true, &mut state, None);
+        assert_eq!(report.index, IndexOutcome::Accepted, "{report:?}");
+        assert!(report.streams.is_empty() && report.stream_ids.is_empty());
+        // And a stream can be published into it again.
+        assert!(publish(&s, "x", &signed).status.success());
+        let report = poll(&s, true, &mut state, None);
+        assert_eq!(report.streams["x"], StreamOutcome::Accepted, "{report:?}");
+    }
+
+    #[test]
     fn grace_under_one_hour_refused() {
         let s = setup("t8-grace");
         let state_file = s.temp.path("publish-state.json");
@@ -917,8 +1116,15 @@ mod feed_publish {
             "{report:?}"
         );
 
+        // Signing over an unsigned index means trusting what nobody signed:
+        // refused, unless the index is rebuilt.
+        let over = publish(&s, "main", &[arg("-k"), &s.key]);
+        assert_eq!(over.status.code(), Some(2), "{over:?}");
+        assert!(text(&over.stderr).contains("--rebuild"), "{over:?}");
+        let rebuilt = publish(&s, "main", &[arg("-k"), &s.key, arg("--rebuild")]);
+        assert!(rebuilt.status.success(), "{rebuilt:?}");
+        assert!(text(&rebuilt.stderr).contains("--rebuild"), "{rebuilt:?}");
         // A feed that has a signature isn't republished without one.
-        assert!(publish(&s, "main", &[arg("-k"), &s.key]).status.success());
         let strip = publish(&s, "main", &[arg("--publisher"), arg("acme.example")]);
         assert_eq!(strip.status.code(), Some(2), "{strip:?}");
         assert!(text(&strip.stderr).contains("feed.sig"), "{strip:?}");
@@ -1064,8 +1270,15 @@ mod feed_read {
                     }
                     let _ = request.respond(response);
                 };
+                // `<file>.status` holding a status code makes the server answer
+                // that for the file, for failures other than 404.
+                let forced = std::fs::read_to_string(file.with_extension("status"))
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u16>().ok());
                 if !authorized {
                     respond(401, Vec::new(), None);
+                } else if let Some(status) = forced {
+                    respond(status, Vec::new(), None);
                 } else if let Ok(bytes) = std::fs::read(&file) {
                     let etag = (etags && url == "/track/feed.json")
                         .then(|| format!("\"{}\"", legible_records::bundle::sha256_hex(&bytes)));
@@ -1249,6 +1462,57 @@ mod feed_read {
         }
         found.sort();
         found
+    }
+
+    #[test]
+    fn a_refused_key_set_is_keys_code_and_exit_1() {
+        let s = setup("t-i2-refused", &["alpha"]);
+        let server = serve(s.feed_dir.clone(), s.keys_dir.clone(), false);
+        let connection = write_connection(&s, server.port, true);
+        // A key set that names another domain is bad_key_set.
+        let mut set: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(s.keys_dir.join("keys.json")).unwrap()).unwrap();
+        set["publisher"] = serde_json::json!("other.example");
+        std::fs::write(
+            s.keys_dir.join("keys.json"),
+            serde_json::to_vec(&set).unwrap(),
+        )
+        .unwrap();
+        let result = run("check", &[&connection], Some(server.port));
+        assert_eq!(result.status.code(), Some(1), "{result:?}");
+        let stdout = text(&result.stdout);
+        assert!(stdout.lines().any(|l| l == "keys: bad_key_set"), "{stdout}");
+        // The pin still checks the feed.
+        assert!(
+            stdout.contains("alpha: accepted (verified acme.example 2026-11)"),
+            "{stdout}"
+        );
+    }
+
+    #[test]
+    fn an_unreachable_key_set_with_a_pin_is_stderr_and_exit_0() {
+        let s = setup("t-i2-unreachable", &["alpha"]);
+        let server = serve(s.feed_dir.clone(), s.keys_dir.clone(), false);
+        std::fs::write(s.keys_dir.join("keys.status"), "503").unwrap();
+        let connection = write_connection(&s, server.port, true);
+        let result = run("check", &[&connection], Some(server.port));
+        assert_eq!(result.status.code(), Some(0), "{result:?}");
+        assert!(text(&result.stderr).contains("keys: failed"), "{result:?}");
+        assert!(!text(&result.stdout).contains("keys:"), "{result:?}");
+        assert!(text(&result.stdout).contains("alpha: accepted (verified"));
+    }
+
+    #[test]
+    fn an_unreachable_key_set_with_nothing_else_is_exit_2() {
+        // R2: a 403 on keys.json can't make a signing publisher look like one
+        // with no key set.
+        let s = setup("t-i2-unreachable-unpinned", &["alpha"]);
+        let server = serve(s.feed_dir.clone(), s.keys_dir.clone(), false);
+        std::fs::write(s.keys_dir.join("keys.status"), "403").unwrap();
+        let connection = write_connection(&s, server.port, false);
+        let result = run("check", &[&connection], Some(server.port));
+        assert_eq!(result.status.code(), Some(2), "{result:?}");
+        assert!(text(&result.stderr).contains("key set"), "{result:?}");
     }
 
     #[test]
@@ -1686,6 +1950,71 @@ mod feed_read {
             assert!(!all.contains(&identity), "{all}");
         }
         assert_eq!(runs[3].status.code(), Some(2));
+
+        // An encrypted feed, read with the identity from the environment, and
+        // then with one that can't decrypt it: neither echoes a secret.
+        let recipient = identity
+            .parse::<age::x25519::Identity>()
+            .unwrap()
+            .to_public()
+            .to_string();
+        let sealed_dir = s.temp.path("sealed");
+        let record = s.temp.path("ack.json");
+        let published = legible(&[
+            arg("feed"),
+            arg("publish"),
+            &sealed_dir,
+            arg("--feed"),
+            arg(FEED),
+            arg("--audience"),
+            arg("Monorail, for Track"),
+            arg("--stream"),
+            arg("alpha"),
+            arg("--title"),
+            arg("Acknowledgments"),
+            arg("-k"),
+            &s.key,
+            arg("-r"),
+            arg(&recipient),
+            &record,
+        ]);
+        assert!(published.status.success(), "{published:?}");
+        assert!(sealed_dir.join("feed.json.age").exists());
+        let sealed = serve(sealed_dir.clone(), s.keys_dir.clone(), false);
+        let sealed_connection = write_connection(&s, sealed.port, true);
+        let (sealed_state, sealed_out) = (s.temp.path("sealed-state"), s.temp.path("sealed-out"));
+        let sealed_pull = pull_args(&s, &sealed_connection, &sealed_state, &sealed_out);
+        let ok = run("pull", &sealed_pull, Some(sealed.port));
+        assert_eq!(ok.status.code(), Some(0), "{ok:?}");
+        assert!(
+            text(&ok.stdout).contains("alpha: accepted (verified"),
+            "{ok:?}"
+        );
+        let other = age::x25519::Identity::generate();
+        let wrong = Command::new(env!("CARGO_BIN_EXE_legible"))
+            .args(["feed", "check"])
+            .arg(&sealed_connection)
+            .arg("--key-origin")
+            .arg(format!("http://127.0.0.1:{}", sealed.port))
+            .env("TRACK_FEED_TOKEN", TOKEN)
+            .env(
+                "TRACK_AGE_IDENTITY",
+                age::secrecy::ExposeSecret::expose_secret(&other.to_string()),
+            )
+            .output()
+            .unwrap();
+        assert_eq!(wrong.status.code(), Some(2), "{wrong:?}");
+        for result in [&ok, &wrong] {
+            let all = format!("{}{}", text(&result.stdout), text(&result.stderr));
+            assert!(!all.contains(TOKEN), "{all}");
+            assert!(!all.contains(&identity), "{all}");
+            assert!(
+                !all.contains(age::secrecy::ExposeSecret::expose_secret(
+                    &other.to_string()
+                )),
+                "{all}"
+            );
+        }
     }
 
     #[test]

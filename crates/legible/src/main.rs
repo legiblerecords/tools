@@ -70,13 +70,15 @@ enum Command {
         #[command(flatten)]
         schema: SchemaArgs,
     },
-    /// Pack, unpack and verify bundles. To encrypt one, pipe it through age; verify and unpack decrypt with -i.
+    /// Pack, sign, verify and unpack bundles. To encrypt one, pipe it through age; verify and
+    /// unpack decrypt with -i.
     #[command(subcommand)]
     Bundle(BundleCommand),
     /// Make signing keys, and endorse key sets with them.
     #[command(subcommand)]
     Keys(KeysCommand),
-    /// Publish a feed: write bundles, the feed index and its signature into a directory.
+    /// Feeds: publish a stream into a feed's directory, check a feed (stateless), or pull one,
+    /// keeping what the reader remembers.
     #[command(subcommand)]
     Feed(feed_cmd::FeedCommand),
 }

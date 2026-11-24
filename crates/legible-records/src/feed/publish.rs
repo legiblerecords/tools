@@ -29,12 +29,17 @@ pub fn next_published_at(now: Instant, previous: Option<&str>) -> String {
     }
 }
 
-/// What a publisher keeps between publishes, so it can delete a bundle only
-/// after a grace period.
+/// What a publisher keeps between publishes: when each bundle lost its last
+/// stream, so it is deleted only after a grace period; and each stream's
+/// last `published_at`, so a stream withdrawn and published again, or an
+/// index rebuilt, never goes back in time.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PublishState {
     /// Bundle path to when it lost its last stream.
     pub unreferenced_since: BTreeMap<String, String>,
+    /// Stream id to the last `published_at` published for it. A state file
+    /// written before this was kept has none.
+    pub published_at: BTreeMap<String, String>,
 }
 
 impl PublishState {
@@ -61,7 +66,23 @@ impl PublishState {
             time::parse(since).map_err(|e| format!("unreferenced_since[{path:?}]: {e}"))?;
             unreferenced_since.insert(path.clone(), since.to_owned());
         }
-        Ok(PublishState { unreferenced_since })
+        let mut published_at = BTreeMap::new();
+        if let Some(listed) = value.get("published_at") {
+            let listed = listed
+                .as_object()
+                .ok_or("not a publish state file: published_at must be an object")?;
+            for (stream, at) in listed {
+                let at = at
+                    .as_str()
+                    .ok_or_else(|| format!("published_at[{stream:?}] must be a string"))?;
+                time::parse(at).map_err(|e| format!("published_at[{stream:?}]: {e}"))?;
+                published_at.insert(stream.clone(), at.to_owned());
+            }
+        }
+        Ok(PublishState {
+            unreferenced_since,
+            published_at,
+        })
     }
 
     /// The state file's bytes.
@@ -70,6 +91,7 @@ impl PublishState {
             "$type": PUBLISH_STATE_TYPE,
             "version": 1,
             "unreferenced_since": self.unreferenced_since,
+            "published_at": self.published_at,
         }))
     }
 }
@@ -199,7 +221,13 @@ mod tests {
         state
             .unreferenced_since
             .insert("bundles/a.zip".into(), "2026-11-24T10:00:00.000Z".into());
+        state
+            .published_at
+            .insert("main".into(), "2026-11-24T10:00:00.000Z".into());
         assert_eq!(PublishState::parse(&state.to_bytes()).unwrap(), state);
+        // A file from before published_at was kept still reads.
+        let old = br#"{"$type":"legible-publish-state","version":1,"unreferenced_since":{}}"#;
+        assert_eq!(PublishState::parse(old).unwrap(), PublishState::default());
         assert!(PublishState::parse(b"{}").is_err());
         assert!(PublishState::parse(b"nope").is_err());
     }
