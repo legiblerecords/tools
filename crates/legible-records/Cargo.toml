@@ -13,6 +13,8 @@ default = ["validate"]
 # Validating records against JSON Schema. Off for the WebAssembly build,
 # where JavaScript validators do this job.
 validate = ["dep:jsonschema"]
+# Encrypted bundles and feeds (age). Off for the WebAssembly build.
+age = ["dep:age"]
 
 [dependencies]
 serde_json.workspace = true
@@ -21,6 +23,7 @@ zip.workspace = true
 flate2.workspace = true
 sha2.workspace = true
 jsonschema = { workspace = true, optional = true }
+age = { version = "0.11", features = ["armor"], optional = true }
 ed25519-dalek.workspace = true
 time.workspace = true
 getrandom.workspace = true

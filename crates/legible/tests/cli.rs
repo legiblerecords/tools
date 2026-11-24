@@ -426,3 +426,62 @@ fn bundle_sign_refuses_a_signed_bundle() {
     assert_eq!(result.status.code(), Some(1), "{result:?}");
     assert!(!temp.path("again.zip").exists());
 }
+
+#[test]
+fn verify_decrypts_with_identity() {
+    use age::secrecy::ExposeSecret;
+    let temp = Temp::new("age");
+    let zip = write_signed(&temp);
+    let identity = age::x25519::Identity::generate();
+    let sealed = legible_records::age::encrypt(
+        &std::fs::read(&zip).unwrap(),
+        &[identity.to_public().to_string()],
+    )
+    .unwrap();
+    let encrypted = temp.path("signed.zip.age");
+    std::fs::write(&encrypted, sealed).unwrap();
+    let identity_file = temp.path("identity.txt");
+    std::fs::write(&identity_file, identity.to_string().expose_secret()).unwrap();
+
+    // With the identity: verified like the plain bundle.
+    let result = legible(&[
+        arg("bundle"),
+        arg("verify"),
+        &encrypted,
+        arg("-i"),
+        &identity_file,
+    ]);
+    assert!(result.status.success(), "{result:?}");
+    assert!(text(&result.stdout).contains("signature:"), "{result:?}");
+    let out = temp.path("out");
+    let unpacked = legible(&[
+        arg("bundle"),
+        arg("unpack"),
+        &encrypted,
+        arg("-i"),
+        &identity_file,
+        arg("-d"),
+        &out,
+    ]);
+    assert!(unpacked.status.success(), "{unpacked:?}");
+    assert!(out.join("manifest.json").exists());
+
+    // Without one: exit 2, and it says what to give.
+    let missing = legible(&[arg("bundle"), arg("verify"), &encrypted]);
+    assert_eq!(missing.status.code(), Some(2), "{missing:?}");
+    assert!(text(&missing.stderr).contains("-i"), "{missing:?}");
+
+    // With another identity: exit 1, and the secret isn't printed.
+    let other = age::x25519::Identity::generate();
+    let other_file = temp.path("other.txt");
+    std::fs::write(&other_file, other.to_string().expose_secret()).unwrap();
+    let wrong = legible(&[
+        arg("bundle"),
+        arg("verify"),
+        &encrypted,
+        arg("-i"),
+        &other_file,
+    ]);
+    assert_eq!(wrong.status.code(), Some(1), "{wrong:?}");
+    assert!(!text(&wrong.stdout).contains(other.to_string().expose_secret()));
+}

@@ -68,7 +68,7 @@ enum Command {
         #[command(flatten)]
         schema: SchemaArgs,
     },
-    /// Pack, unpack and verify bundles. To encrypt one, pipe it through age.
+    /// Pack, unpack and verify bundles. To encrypt one, pipe it through age; verify and unpack decrypt with -i.
     #[command(subcommand)]
     Bundle(BundleCommand),
     /// Make signing keys, and endorse key sets with them.
@@ -185,11 +185,14 @@ enum BundleCommand {
     },
     /// Verify a bundle and write its files into a new or empty directory.
     Unpack {
-        /// The bundle (.zip), or - for stdin.
+        /// The bundle (.zip or encrypted .zip.age), or - for stdin.
         bundle: PathBuf,
         /// The directory to write into.
         #[arg(long, short = 'd')]
         directory: PathBuf,
+        /// An age identity file, to decrypt a bundle that is encrypted.
+        #[arg(long, short = 'i')]
+        identity: Option<PathBuf>,
         /// Schemas for checking record references; see verify.
         #[arg(long = "schema", short = 's')]
         schemas: Vec<PathBuf>,
@@ -215,8 +218,11 @@ enum BundleCommand {
     /// says `verified`, which needs --pin or --key-set. Without them, a signed bundle is
     /// reported `unverified`, and a bad bundle is still exit 1.
     Verify {
-        /// The bundle (.zip), or - for stdin.
+        /// The bundle (.zip or encrypted .zip.age), or - for stdin.
         bundle: PathBuf,
+        /// An age identity file, to decrypt a bundle that is encrypted.
+        #[arg(long, short = 'i')]
+        identity: Option<PathBuf>,
         /// A schema (.yaml or .json) whose records' references to check; repeat for several.
         /// Attachment references are always checked.
         #[arg(long = "schema", short = 's')]
@@ -423,11 +429,12 @@ fn run_bundle(command: BundleCommand) -> Result<(), Stop> {
         }
         BundleCommand::Verify {
             bundle: path,
+            identity,
             schemas,
             trust,
             schema,
         } => {
-            let opened = open_bundle(&path)?;
+            let opened = open_bundle(&path, identity.as_deref())?;
             verify_bundle(&path, &opened, &schemas, &trust, &schema)
         }
         BundleCommand::Sign {
@@ -449,11 +456,12 @@ fn run_bundle(command: BundleCommand) -> Result<(), Stop> {
         BundleCommand::Unpack {
             bundle: path,
             directory,
+            identity,
             schemas,
             trust,
             schema,
         } => {
-            let opened = open_bundle(&path)?;
+            let opened = open_bundle(&path, identity.as_deref())?;
             verify_bundle(&path, &opened, &schemas, &trust, &schema)?;
             let empty = match std::fs::read_dir(&directory) {
                 Ok(mut entries) => entries.next().is_none(),
@@ -552,13 +560,23 @@ fn write_output(path: &Path, bytes: &[u8]) -> Result<(), Stop> {
     std::fs::write(path, bytes).map_err(|e| Stop::Failed(format!("{}: {e}", path.display())))
 }
 
-fn open_bundle(path: &Path) -> Result<bundle::Opened, Stop> {
-    let bytes = read_input(path)?;
-    if bytes.starts_with(b"age-encryption.org/") || bytes.starts_with(b"-----BEGIN AGE") {
-        return Err(Stop::Failed(format!(
-            "{}: encrypted with age; decrypt it first (age -d)",
-            path.display()
-        )));
+fn open_bundle(path: &Path, identity: Option<&Path>) -> Result<bundle::Opened, Stop> {
+    let mut bytes = read_input(path)?;
+    if legible_records::age::is_encrypted(&bytes) {
+        let Some(identity) = identity else {
+            return Err(Stop::Failed(format!(
+                "{}: encrypted with age; give the identity file with -i",
+                path.display()
+            )));
+        };
+        let text = zeroize::Zeroizing::new(
+            String::from_utf8(read_input(identity)?)
+                .map_err(|_| Stop::Failed(format!("{}: not text", identity.display())))?,
+        );
+        bytes = legible_records::age::decrypt(&bytes, &text).map_err(|e| {
+            println!("{}: couldn't decrypt: {e}", path.display());
+            Stop::Problems
+        })?;
     }
     bundle::open(&bytes, Limits::default()).map_err(|problems| {
         for problem in &problems {

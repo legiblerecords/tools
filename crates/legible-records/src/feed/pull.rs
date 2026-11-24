@@ -107,8 +107,18 @@ pub struct PullOptions<'a> {
     pub limits: Limits,
 }
 
-/// The message for an encrypted feed in a build that can't decrypt.
-const NO_AGE: &str = "feed.json.age: the feed is encrypted, and this reader was built without age";
+/// Decrypts a stored file for `pull`. The error is the reason, without the
+/// path.
+#[cfg(feature = "age")]
+fn unseal(bytes: &[u8], identity: Option<&str>) -> Result<Vec<u8>, String> {
+    let identity = identity.ok_or("it is encrypted, and no age identity is configured")?;
+    crate::age::decrypt(bytes, identity)
+}
+
+#[cfg(not(feature = "age"))]
+fn unseal(_bytes: &[u8], _identity: Option<&str>) -> Result<Vec<u8>, String> {
+    Err("it is encrypted, and this reader was built without age".to_owned())
+}
 
 impl PullReport {
     fn new() -> PullReport {
@@ -222,11 +232,16 @@ pub fn pull(
         return report.index(IndexOutcome::Refused(code));
     }
 
-    // 3. Decrypt (T6), then the index must be a valid feed whose bundle
-    // paths name their own hashes in the feed's mode.
-    if encrypted {
-        return report.index(IndexOutcome::Failed(NO_AGE.to_owned()));
-    }
+    // 3. Decrypt, then the index must be a valid feed whose bundle paths
+    // name their own hashes in the feed's mode.
+    let stored = if encrypted {
+        match unseal(&stored, options.identity) {
+            Ok(plain) => plain,
+            Err(e) => return report.index(IndexOutcome::Failed(format!("feed.json.age: {e}"))),
+        }
+    } else {
+        stored
+    };
     let index = match parse_feed(&stored) {
         Ok(index) if check_bundle_paths(&index, encrypted).is_ok() => index,
         _ => return report.index(IndexOutcome::Refused(Code::BadFeed)),
@@ -447,8 +462,16 @@ fn check_stream(
     if sha256_hex(&bytes) != entry.sha256 {
         return Err(StreamOutcome::Refused(Code::DownloadMismatch));
     }
-    // An encrypted bundle is decrypted here (T6); this build reached no
-    // encrypted index, so it has none.
+    // An encrypted feed's bundles are encrypted: the download was checked
+    // over the ciphertext, and now it is opened.
+    let bytes = if entry.bundle.ends_with(".age") {
+        match unseal(&bytes, options.identity) {
+            Ok(plain) => plain,
+            Err(e) => return Err(failed(&e)),
+        }
+    } else {
+        bytes
+    };
     let refused = |code| Err(StreamOutcome::Refused(code));
     let Ok(bundle) = open(&bytes, options.limits) else {
         return refused(Code::BadBundle);

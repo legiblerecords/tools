@@ -1,6 +1,8 @@
 //! Legible Records (<https://github.com/legiblerecords/spec>): legible,
 //! portable, pragmatic security records.
 //!
+//! - [`age`]: encrypted bundles and feeds (encrypting and decrypting need
+//!   feature `age`);
 //! - [`bundle`]: packing, opening and verifying bundles;
 //! - [`code`]: the outcome codes readers return;
 //! - [`feed`]: feed indexes, connection files, reader state and reading a
@@ -17,6 +19,7 @@
 //! - [`validate`]: validates records against their types (feature
 //!   `validate`).
 
+pub mod age;
 pub mod bundle;
 pub mod code;
 pub mod compat;
