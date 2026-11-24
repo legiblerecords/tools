@@ -21,6 +21,7 @@ sha2 = "0.10"
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "fast", "zeroize", "rand_core"] }
 time = { version = "0.3", features = ["parsing", "formatting"] }
 getrandom = "0.2"
+zeroize = "1"
 legible-records = { path = "crates/legible-records", version = "0.1.0", default-features = false }
 
 # The WebAssembly build for npm: smallest code over fastest, since it is

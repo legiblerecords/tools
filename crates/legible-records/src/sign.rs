@@ -5,6 +5,7 @@ use crate::bundle::canonical_record;
 use crate::code::Code;
 use ed25519_dalek::{Signature, Signer, VerifyingKey};
 use serde_json::{json, Map, Value};
+use zeroize::Zeroizing;
 
 /// What a signature is over. Each context has its own prefix, so a signature
 /// made for one kind of file can't be passed off as another.
@@ -100,21 +101,25 @@ impl SigningKey {
         if field("alg")? != "ed25519" {
             return Err("not a secret key file: alg isn't ed25519".to_owned());
         }
-        let seed: [u8; 32] = from_b64url(field("seed")?)?
-            .try_into()
-            .map_err(|_| "not a secret key file: seed isn't 32 bytes".to_owned())?;
+        let seed: [u8; 32] = Zeroizing::new(
+            from_b64url(field("seed")?)
+                .map_err(|_| "not a secret key file: seed is not base64url without padding")?,
+        )
+        .as_slice()
+        .try_into()
+        .map_err(|_| "not a secret key file: seed isn't 32 bytes".to_owned())?;
         SigningKey::from_seed(field("publisher")?, field("id")?, seed)
     }
 
     /// The secret key file: `{"$type": "legible-secret-key", ...}`.
-    pub fn to_json(&self) -> Vec<u8> {
-        canonical_record(&json!({
+    pub fn to_json(&self) -> Zeroizing<Vec<u8>> {
+        Zeroizing::new(canonical_record(&json!({
             "$type": "legible-secret-key",
             "publisher": self.publisher,
             "id": self.id,
             "alg": "ed25519",
             "seed": b64url(&self.inner.to_bytes()),
-        }))
+        })))
     }
 
     /// The public half.
@@ -271,7 +276,8 @@ pub fn b64url(bytes: &[u8]) -> String {
 /// Reads base64url without padding. Padding, other characters and a final
 /// group with leftover bits are errors.
 pub fn from_b64url(s: &str) -> Result<Vec<u8>, String> {
-    let bad = || format!("{s:?} is not base64url without padding");
+    // The input is never echoed: it may be a secret.
+    let bad = || "not base64url without padding".to_owned();
     if s.len() % 4 == 1 {
         return Err(bad());
     }

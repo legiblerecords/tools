@@ -197,3 +197,50 @@ fn codes_round_trip() {
     assert_eq!(Code::KeySetRollback.as_str(), "key_set_rollback");
     assert_eq!(Code::parse("nope"), None);
 }
+
+#[test]
+fn malformed_seed_is_not_echoed() {
+    let seed = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    for bad in [
+        seed,
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB",
+        "secret seed!",
+    ] {
+        let json = format!(
+            r#"{{"$type":"legible-secret-key","publisher":"acme.example","id":"k","alg":"ed25519","seed":"{bad}"}}"#
+        );
+        let err = SigningKey::from_json(json.as_bytes())
+            .err()
+            .expect("refused");
+        assert!(!err.contains(bad), "{err}");
+    }
+    assert!(!from_b64url("secret seed!").unwrap_err().contains("secret"));
+}
+
+#[test]
+fn malleated_signature_is_refused() {
+    // The group order L, little-endian. Adding it to S gives a second
+    // encoding of the same signature that verify_strict must refuse.
+    const L: [u8; 32] = [
+        0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde,
+        0x14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10,
+    ];
+    let key = SigningKey::from_seed("acme.example", "k", TEST_SEED).unwrap();
+    let sig = sign(&key, Context::Manifest, b"message");
+    assert_eq!(
+        verify(&key.public(), Context::Manifest, b"message", &sig),
+        Ok(())
+    );
+    let mut bad = sig.clone();
+    let mut carry = 0u16;
+    for (i, l) in L.iter().enumerate() {
+        let sum = u16::from(bad.signature[32 + i]) + u16::from(*l) + carry;
+        bad.signature[32 + i] = sum as u8;
+        carry = sum >> 8;
+    }
+    assert_eq!(carry, 0);
+    assert_eq!(
+        verify(&key.public(), Context::Manifest, b"message", &bad),
+        Err(Code::BadSignature)
+    );
+}

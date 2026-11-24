@@ -637,6 +637,7 @@ dependencies = [
  "sha2",
  "time",
  "yaml-rust2",
+ "zeroize",
  "zip",
 ]
 

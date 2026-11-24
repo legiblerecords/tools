@@ -24,6 +24,7 @@ jsonschema = { workspace = true, optional = true }
 ed25519-dalek.workspace = true
 time.workspace = true
 getrandom.workspace = true
+zeroize.workspace = true
 
 # getrandom has no source on wasm32-unknown-unknown without `js`, so the core crate
 # builds there on its own.
