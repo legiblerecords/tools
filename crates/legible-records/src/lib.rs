@@ -3,6 +3,7 @@
 //!
 //! - [`bundle`]: packing, opening and verifying bundles;
 //! - [`code`]: the outcome codes readers return;
+//! - [`keys`]: key sets, endorsement and what a reader trusts;
 //! - [`sign`]: Ed25519 keys, contexts and signature files;
 //! - [`time`]: RFC 3339 instants;
 //! - [`short_form`]: the schema language, expanding short-form schemas to
@@ -17,6 +18,7 @@
 pub mod bundle;
 pub mod code;
 pub mod compat;
+pub mod keys;
 pub mod lint;
 pub mod short_form;
 pub mod sign;

@@ -44,7 +44,7 @@ pub struct SigningKey {
 }
 
 /// Whether `s` is a key id: `^[a-z0-9][a-z0-9.-]{0,63}$`.
-fn is_key_id(s: &str) -> bool {
+pub(crate) fn is_key_id(s: &str) -> bool {
     let b = s.as_bytes();
     (1..=64).contains(&b.len())
         && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit())
