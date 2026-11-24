@@ -1,5 +1,7 @@
 //! `legible`: the Legible Records command-line tool.
 
+mod feed_cmd;
+
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -74,6 +76,9 @@ enum Command {
     /// Make signing keys, and endorse key sets with them.
     #[command(subcommand)]
     Keys(KeysCommand),
+    /// Publish a feed: write bundles, the feed index and its signature into a directory.
+    #[command(subcommand)]
+    Feed(feed_cmd::FeedCommand),
 }
 
 #[derive(Subcommand)]
@@ -305,6 +310,7 @@ fn main() -> ExitCode {
 
 fn run(command: Command) -> Result<(), Stop> {
     match command {
+        Command::Feed(command) => feed_cmd::run(command),
         Command::Expand { file, schema } => {
             let body = load_schema(&file, &schema)?;
             println!("{}", pretty(&body));

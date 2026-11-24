@@ -485,3 +485,507 @@ fn verify_decrypts_with_identity() {
     assert_eq!(wrong.status.code(), Some(1), "{wrong:?}");
     assert!(!text(&wrong.stdout).contains(other.to_string().expose_secret()));
 }
+
+// ---- legible feed publish ----
+
+mod feed_publish {
+    use super::*;
+    use age::secrecy::ExposeSecret;
+    use legible_records::feed::{
+        next_published_at, parse_feed, pull, Auth, Connection, IndexOutcome, Location, NoKeySource,
+        PullOptions, ReaderState, StreamOutcome,
+    };
+    use legible_records::keys::Pin;
+    use legible_records::time;
+
+    const FEED: &str = "acme.example/track";
+
+    /// A publisher's directory, a record to publish and a test-only key.
+    struct Setup {
+        temp: Temp,
+        feed_dir: PathBuf,
+        key: PathBuf,
+        pin: Pin,
+    }
+
+    fn setup(name: &str) -> Setup {
+        let temp = Temp::new(name);
+        let entry = keys_new(&temp, "key.json", "acme.example", "2026-11");
+        let public = legible_records::sign::from_b64url(entry["public_key"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let feed_dir = temp.path("feed");
+        std::fs::write(
+            temp.path("ack.json"),
+            br#"{"$type":"tech.monorail.policy.acknowledgment","version":1,"id":"ack-1","title":"Acknowledged"}"#,
+        )
+        .unwrap();
+        let key = temp.path("key.json");
+        Setup {
+            temp,
+            feed_dir,
+            key,
+            pin: Pin {
+                publisher: "acme.example".to_owned(),
+                id: "2026-11".to_owned(),
+                public_key: public,
+            },
+        }
+    }
+
+    fn os(args: &[&Path]) -> Output {
+        legible(args)
+    }
+
+    /// `legible feed publish` with the usual arguments, then `extra`.
+    fn publish(s: &Setup, stream: &str, extra: &[&Path]) -> Output {
+        let record = s.temp.path("ack.json");
+        let mut args: Vec<&Path> = vec![
+            arg("feed"),
+            arg("publish"),
+            &s.feed_dir,
+            arg("--feed"),
+            arg(FEED),
+            arg("--audience"),
+            arg("Monorail, for Track"),
+            arg("--stream"),
+            arg(stream),
+            arg("--title"),
+            arg("Policy acknowledgments"),
+        ];
+        args.extend_from_slice(extra);
+        if !extra.contains(&arg("--withdraw")) {
+            args.push(&record);
+        }
+        os(&args)
+    }
+
+    fn connection(s: &Setup, signed: bool) -> Connection {
+        Connection {
+            feed: FEED.to_owned(),
+            location: Location::Https {
+                url: "https://feeds.acme.example/track/".to_owned(),
+            },
+            auth: Auth::None,
+            pins: if signed { vec![s.pin.clone()] } else { vec![] },
+            age_identity_env: None,
+        }
+    }
+
+    fn poll(
+        s: &Setup,
+        signed: bool,
+        state: &mut ReaderState,
+        identity: Option<&str>,
+    ) -> legible_records::feed::PullReport {
+        let mut source = legible_records::feed::DirSource {
+            root: s.feed_dir.clone(),
+        };
+        let options = PullOptions {
+            identity,
+            ..PullOptions::default()
+        };
+        pull(
+            &mut source,
+            &mut NoKeySource,
+            &connection(s, signed),
+            Some(state),
+            &mut |_| Ok(()),
+            &options,
+        )
+    }
+
+    fn bundles(s: &Setup) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(s.feed_dir.join("bundles"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn publish_then_pull_round_trip() {
+        let s = setup("t8-round");
+        let result = publish(&s, "policy-acknowledgments", &[arg("-k"), &s.key]);
+        assert!(result.status.success(), "{result:?}");
+
+        // The bundle is named by the hash of the stored file.
+        let index_bytes = std::fs::read(s.feed_dir.join("feed.json")).unwrap();
+        let feed = parse_feed(&index_bytes).unwrap();
+        assert_eq!(feed.id, FEED);
+        assert_eq!(feed.publisher, "acme.example");
+        assert_eq!(feed.audience, "Monorail, for Track");
+        let entry = &feed.streams[0];
+        assert_eq!(
+            entry.record_types,
+            ["tech.monorail.policy.acknowledgment"],
+            "defaults to the inputs' $types"
+        );
+        let stored = std::fs::read(s.feed_dir.join(&entry.bundle)).unwrap();
+        let sha = legible_records::bundle::sha256_hex(&stored);
+        assert_eq!(entry.bundle, format!("bundles/{sha}.zip"));
+        assert_eq!(entry.sha256, sha);
+        assert!(!s.feed_dir.join("feed.json.age").exists());
+
+        // feed.sig signs the stored index.
+        let sig = std::fs::read(s.feed_dir.join("feed.sig")).unwrap();
+        let file = legible_records::sign::SignatureFile::parse(&sig).unwrap();
+        assert_eq!(
+            (file.publisher.as_str(), file.key.as_str()),
+            ("acme.example", "2026-11")
+        );
+
+        // A reader built in T5-T7 accepts it, and verifies the signature.
+        let mut state = ReaderState::default();
+        let mut delivered = Vec::new();
+        let mut source = legible_records::feed::DirSource {
+            root: s.feed_dir.clone(),
+        };
+        let report = pull(
+            &mut source,
+            &mut NoKeySource,
+            &connection(&s, true),
+            Some(&mut state),
+            &mut |d| {
+                delivered.push(d);
+                Ok(())
+            },
+            &PullOptions::default(),
+        );
+        assert_eq!(report.index, IndexOutcome::Accepted, "{report:?}");
+        assert_eq!(
+            report.streams["policy-acknowledgments"],
+            StreamOutcome::Accepted,
+            "{report:?}"
+        );
+        assert!(
+            matches!(
+                delivered[0].signature,
+                legible_records::bundle::SignatureStatus::Verified { .. }
+            ),
+            "{:?}",
+            delivered[0].signature
+        );
+        assert_eq!(delivered[0].published_at, entry.published_at);
+    }
+
+    #[test]
+    fn publish_twice_same_instant_is_later() {
+        let t = time::parse("2026-11-24T10:00:00.123Z").unwrap();
+        let first = time::format(t);
+        assert!(
+            time::parse(&next_published_at(t, Some(&first))).unwrap()
+                > time::parse(&first).unwrap()
+        );
+
+        let s = setup("t8-twice");
+        let mut state = ReaderState::default();
+        for round in 0..2 {
+            let result = publish(&s, "policy-acknowledgments", &[arg("-k"), &s.key]);
+            assert!(result.status.success(), "{result:?}");
+            let report = poll(&s, true, &mut state, None);
+            assert_eq!(report.index, IndexOutcome::Accepted, "{round}: {report:?}");
+            assert_eq!(
+                report.streams["policy-acknowledgments"],
+                StreamOutcome::Accepted,
+                "{round}: {report:?}"
+            );
+        }
+        // Back to back, the second is strictly later in both places.
+        let feed = parse_feed(&std::fs::read(s.feed_dir.join("feed.json")).unwrap()).unwrap();
+        assert!(feed.updated_at >= feed.streams[0].published_at);
+    }
+
+    #[test]
+    fn published_at_follows_a_previous_one_in_the_future() {
+        let s = setup("t8-future");
+        assert!(publish(&s, "a", &[arg("-k"), &s.key]).status.success());
+        // Pretend the last publish was a minute from now: the next must still be later.
+        let path = s.feed_dir.join("feed.json");
+        let mut feed = parse_feed(&std::fs::read(&path).unwrap()).unwrap();
+        let ahead = time::format(time::now().plus_millis(60_000));
+        feed.updated_at = ahead.clone();
+        feed.streams[0].published_at = ahead.clone();
+        let bytes = legible_records::feed::render_feed(&feed);
+        std::fs::write(&path, &bytes).unwrap();
+        let sig = legible_records::sign::sign(
+            &legible_records::sign::SigningKey::from_json(&std::fs::read(&s.key).unwrap()).unwrap(),
+            legible_records::sign::Context::Feed,
+            &bytes,
+        );
+        std::fs::write(s.feed_dir.join("feed.sig"), sig.to_bytes()).unwrap();
+
+        assert!(publish(&s, "a", &[arg("-k"), &s.key]).status.success());
+        let feed = parse_feed(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(time::parse(&feed.updated_at).unwrap() > time::parse(&ahead).unwrap());
+        assert!(time::parse(&feed.streams[0].published_at).unwrap() > time::parse(&ahead).unwrap());
+    }
+
+    #[test]
+    fn withdraw_removes_stream() {
+        let s = setup("t8-withdraw");
+        assert!(publish(&s, "one", &[arg("-k"), &s.key]).status.success());
+        assert!(publish(&s, "two", &[arg("-k"), &s.key]).status.success());
+        let mut state = ReaderState::default();
+        let report = poll(&s, true, &mut state, None);
+        assert_eq!(report.stream_ids, ["one", "two"], "{report:?}");
+
+        let withdrawn = publish(&s, "one", &[arg("--withdraw"), arg("-k"), &s.key]);
+        assert!(withdrawn.status.success(), "{withdrawn:?}");
+        let report = poll(&s, true, &mut state, None);
+        assert_eq!(report.index, IndexOutcome::Accepted, "{report:?}");
+        assert_eq!(report.stream_ids, ["two"]);
+        assert_eq!(report.streams["one"], StreamOutcome::Withdrawn);
+
+        // A stream that isn't there can't be withdrawn.
+        let again = publish(&s, "one", &[arg("--withdraw"), arg("-k"), &s.key]);
+        assert_eq!(again.status.code(), Some(2), "{again:?}");
+    }
+
+    #[test]
+    fn gc_respects_grace() {
+        let s = setup("t8-gc");
+        let state_file = s.temp.path("publish-state.json");
+        let with_state = [arg("-k"), &s.key, arg("--state"), &state_file];
+        assert!(publish(&s, "main", &with_state).status.success());
+        let first = bundles(&s);
+        assert_eq!(first.len(), 1);
+
+        // Replacing the bundle makes the old one unreferenced, not deleted.
+        assert!(publish(&s, "main", &with_state).status.success());
+        let both = bundles(&s);
+        assert_eq!(both.len(), 2, "{both:?}");
+        let state = std::fs::read_to_string(&state_file).unwrap();
+        assert!(state.contains(&first[0]), "{state}");
+
+        // Within the grace it stays.
+        assert!(publish(&s, "main", &with_state).status.success());
+        assert!(bundles(&s).contains(&first[0]));
+
+        // Past the grace, it goes, and the current ones stay.
+        let mut value: serde_json::Value = serde_json::from_str(&state).unwrap();
+        for (_, since) in value["unreferenced_since"].as_object_mut().unwrap() {
+            *since = serde_json::json!("2020-01-01T00:00:00.000Z");
+        }
+        std::fs::write(&state_file, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(publish(&s, "main", &with_state).status.success());
+        let after = bundles(&s);
+        assert!(!after.contains(&first[0]), "{after:?}");
+        let feed = parse_feed(&std::fs::read(s.feed_dir.join("feed.json")).unwrap()).unwrap();
+        assert!(after.contains(&feed.streams[0].bundle["bundles/".len()..].to_owned()));
+        let report = poll(&s, true, &mut ReaderState::default(), None);
+        assert_eq!(report.index, IndexOutcome::Accepted, "{report:?}");
+
+        // Without --state nothing is ever deleted.
+        let before = bundles(&s).len();
+        assert!(publish(&s, "main", &[arg("-k"), &s.key]).status.success());
+        assert_eq!(bundles(&s).len(), before + 1);
+    }
+
+    #[test]
+    fn grace_under_one_hour_refused() {
+        let s = setup("t8-grace");
+        let state_file = s.temp.path("publish-state.json");
+        let result = publish(
+            &s,
+            "main",
+            &[
+                arg("-k"),
+                &s.key,
+                arg("--state"),
+                &state_file,
+                arg("--grace"),
+                arg("0.5"),
+            ],
+        );
+        assert_eq!(result.status.code(), Some(2), "{result:?}");
+        assert!(text(&result.stderr).contains("grace"), "{result:?}");
+        assert!(!s.feed_dir.join("feed.json").exists());
+        assert!(!state_file.exists());
+        // An hour exactly is fine.
+        let ok = publish(&s, "main", &[arg("-k"), &s.key, arg("--grace"), arg("1")]);
+        assert!(ok.status.success(), "{ok:?}");
+    }
+
+    #[test]
+    fn encrypted_publish_pulls_with_identity() {
+        let s = setup("t8-age");
+        let identity = age::x25519::Identity::generate();
+        let identity_file = s.temp.path("identity.txt");
+        std::fs::write(&identity_file, identity.to_string().expose_secret()).unwrap();
+        let recipient = identity.to_public().to_string();
+        let encrypted = [arg("-k"), &s.key, arg("-r"), arg(&recipient)];
+        let result = publish(&s, "main", &encrypted);
+        assert!(result.status.success(), "{result:?}");
+        assert!(s.feed_dir.join("feed.json.age").exists());
+        assert!(!s.feed_dir.join("feed.json").exists());
+        let names = bundles(&s);
+        assert!(names[0].ends_with(".zip.age"), "{names:?}");
+        let stored = std::fs::read(s.feed_dir.join("bundles").join(&names[0])).unwrap();
+        assert!(legible_records::age::is_encrypted(&stored));
+        assert_eq!(
+            names[0],
+            format!("{}.zip.age", legible_records::bundle::sha256_hex(&stored))
+        );
+        // feed.sig signs the ciphertext.
+        let sealed = std::fs::read(s.feed_dir.join("feed.json.age")).unwrap();
+        let sig = std::fs::read(s.feed_dir.join("feed.sig")).unwrap();
+        let trust = legible_records::keys::Trust {
+            pins: vec![s.pin.clone()],
+            ..Default::default()
+        };
+        legible_records::bundle::check_signed(
+            Some(&sig),
+            legible_records::sign::Context::Feed,
+            &sealed,
+            &trust,
+            Some("acme.example"),
+        )
+        .unwrap();
+
+        let secret = identity.to_string();
+        let mut state = ReaderState::default();
+        let report = poll(&s, true, &mut state, Some(secret.expose_secret()));
+        assert_eq!(report.index, IndexOutcome::Accepted, "{report:?}");
+        assert_eq!(
+            report.streams["main"],
+            StreamOutcome::Accepted,
+            "{report:?}"
+        );
+        // Without the identity a reader can't read it.
+        let blind = poll(&s, true, &mut ReaderState::default(), None);
+        assert!(matches!(blind.index, IndexOutcome::Failed(_)), "{blind:?}");
+
+        // Adding to an encrypted feed needs the identity to read the old index.
+        let without = publish(&s, "other", &encrypted);
+        assert_eq!(without.status.code(), Some(2), "{without:?}");
+        assert!(text(&without.stderr).contains("-i"), "{without:?}");
+        assert!(!s.feed_dir.join("feed.json").exists());
+        let mut with = encrypted.to_vec();
+        with.extend([arg("-i"), identity_file.as_path()]);
+        let ok = publish(&s, "other", &with);
+        assert!(ok.status.success(), "{ok:?}");
+        let report = poll(&s, true, &mut state, Some(secret.expose_secret()));
+        assert_eq!(report.stream_ids, ["main", "other"], "{report:?}");
+        assert_eq!(
+            report.streams["other"],
+            StreamOutcome::Accepted,
+            "{report:?}"
+        );
+
+        // Never both, and never the other mode.
+        let plain = publish(&s, "main", &[arg("-k"), &s.key, arg("-i"), &identity_file]);
+        assert_eq!(plain.status.code(), Some(2), "{plain:?}");
+        assert!(text(&plain.stderr).contains("encrypted"), "{plain:?}");
+        assert!(!s.feed_dir.join("feed.json").exists());
+    }
+
+    #[test]
+    fn plain_feed_refuses_recipients() {
+        let s = setup("t8-mode");
+        assert!(publish(&s, "main", &[arg("-k"), &s.key]).status.success());
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public().to_string();
+        let result = publish(&s, "main", &[arg("-k"), &s.key, arg("-r"), arg(&recipient)]);
+        assert_eq!(result.status.code(), Some(2), "{result:?}");
+        assert!(text(&result.stderr).contains("plain"), "{result:?}");
+        assert!(!s.feed_dir.join("feed.json.age").exists());
+    }
+
+    #[test]
+    fn unsigned_publish_needs_a_publisher_and_pulls_unverified() {
+        let s = setup("t8-unsigned");
+        let missing = publish(&s, "main", &[]);
+        assert_eq!(missing.status.code(), Some(2), "{missing:?}");
+        assert!(text(&missing.stderr).contains("--publisher"), "{missing:?}");
+
+        let wrong = publish(&s, "main", &[arg("--publisher"), arg("other.example")]);
+        assert_eq!(wrong.status.code(), Some(2), "{wrong:?}");
+        assert!(!s.feed_dir.join("feed.json").exists());
+
+        let ok = publish(&s, "main", &[arg("--publisher"), arg("acme.example")]);
+        assert!(ok.status.success(), "{ok:?}");
+        assert!(!s.feed_dir.join("feed.sig").exists());
+        let report = poll(&s, false, &mut ReaderState::default(), None);
+        assert_eq!(report.index, IndexOutcome::Accepted, "{report:?}");
+        assert_eq!(
+            report.streams["main"],
+            StreamOutcome::Accepted,
+            "{report:?}"
+        );
+
+        // A feed that has a signature isn't republished without one.
+        assert!(publish(&s, "main", &[arg("-k"), &s.key]).status.success());
+        let strip = publish(&s, "main", &[arg("--publisher"), arg("acme.example")]);
+        assert_eq!(strip.status.code(), Some(2), "{strip:?}");
+        assert!(text(&strip.stderr).contains("feed.sig"), "{strip:?}");
+    }
+
+    #[test]
+    fn publish_refuses_a_feed_it_cannot_read_or_that_is_not_its_own() {
+        let s = setup("t8-existing");
+        std::fs::create_dir_all(&s.feed_dir).unwrap();
+        std::fs::write(s.feed_dir.join("feed.json"), b"not json").unwrap();
+        let broken = publish(&s, "main", &[arg("-k"), &s.key]);
+        assert_eq!(broken.status.code(), Some(2), "{broken:?}");
+        assert_eq!(
+            std::fs::read(s.feed_dir.join("feed.json")).unwrap(),
+            b"not json"
+        );
+
+        std::fs::remove_file(s.feed_dir.join("feed.json")).unwrap();
+        assert!(publish(&s, "main", &[arg("-k"), &s.key]).status.success());
+        let record = s.temp.path("ack.json");
+        let other = legible(&[
+            arg("feed"),
+            arg("publish"),
+            &s.feed_dir,
+            arg("--feed"),
+            arg("acme.example/other"),
+            arg("--audience"),
+            arg("x"),
+            arg("--stream"),
+            arg("main"),
+            arg("--title"),
+            arg("t"),
+            arg("-k"),
+            &s.key,
+            &record,
+        ]);
+        assert_eq!(other.status.code(), Some(2), "{other:?}");
+        assert!(
+            text(&other.stderr).contains("acme.example/track"),
+            "{other:?}"
+        );
+
+        // Both forms present: refused.
+        std::fs::write(s.feed_dir.join("feed.json.age"), b"x").unwrap();
+        let both = publish(&s, "main", &[arg("-k"), &s.key]);
+        assert_eq!(both.status.code(), Some(2), "{both:?}");
+    }
+
+    #[test]
+    fn record_type_flag_overrides_the_default() {
+        let s = setup("t8-types");
+        let result = publish(
+            &s,
+            "main",
+            &[
+                arg("-k"),
+                &s.key,
+                arg("--record-type"),
+                arg("tech.monorail.a"),
+                arg("--record-type"),
+                arg("tech.monorail.b"),
+            ],
+        );
+        assert!(result.status.success(), "{result:?}");
+        let feed = parse_feed(&std::fs::read(s.feed_dir.join("feed.json")).unwrap()).unwrap();
+        assert_eq!(
+            feed.streams[0].record_types,
+            ["tech.monorail.a", "tech.monorail.b"]
+        );
+    }
+}

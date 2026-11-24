@@ -6,16 +6,19 @@
 //! - connection files, in [`connection`];
 //! - what a reader keeps between polls, in [`state`];
 //! - where a feed's files and key sets come from, in [`source`];
+//! - what a publisher works out before writing, in [`publish`];
 //! - one poll, in the spec's order, in [`mod@pull`].
 
 pub mod connection;
 pub mod index;
+pub mod publish;
 pub mod pull;
 pub mod source;
 pub mod state;
 
 pub use connection::{parse_connection, Auth, Connection, Location};
 pub use index::{check_bundle_paths, parse_feed, Feed, StreamEntry};
+pub use publish::{collectable, next_published_at, render_feed, PublishState};
 pub use pull::{pull, Delivered, IndexOutcome, PullOptions, PullReport, StreamOutcome};
 #[cfg(not(target_arch = "wasm32"))]
 pub use source::DirSource;

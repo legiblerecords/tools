@@ -35,3 +35,22 @@ pub fn format(i: Instant) -> String {
         t.millisecond()
     )
 }
+
+impl Instant {
+    /// This instant dropped to a whole number of milliseconds, which is the
+    /// precision [`format`] writes.
+    pub fn truncated_to_millis(self) -> Instant {
+        let nanos = self.0.nanosecond() / 1_000_000 * 1_000_000;
+        Instant(self.0.replace_nanosecond(nanos).unwrap_or(self.0))
+    }
+
+    /// This instant moved `millis` later (earlier, when negative); an
+    /// instant out of the representable range stays as it is.
+    pub fn plus_millis(self, millis: i64) -> Instant {
+        Instant(
+            self.0
+                .checked_add(::time::Duration::milliseconds(millis))
+                .unwrap_or(self.0),
+        )
+    }
+}
