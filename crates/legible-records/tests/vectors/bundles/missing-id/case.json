@@ -1,0 +1,11 @@
+{
+  "expect": {
+    "error": "bad_bundle"
+  },
+  "expected_publisher": null,
+  "name": "missing-id",
+  "trust": {
+    "key_sets": [],
+    "pins": []
+  }
+}
