@@ -3,6 +3,8 @@
 //!
 //! - [`bundle`]: packing, opening and verifying bundles;
 //! - [`code`]: the outcome codes readers return;
+//! - [`feed`]: feed indexes, connection files, reader state and reading a
+//!   feed;
 //! - [`keys`]: key sets, endorsement and what a reader trusts;
 //! - [`sign`]: Ed25519 keys, contexts and signature files;
 //! - [`time`]: RFC 3339 instants;
@@ -18,6 +20,7 @@
 pub mod bundle;
 pub mod code;
 pub mod compat;
+pub mod feed;
 pub mod keys;
 pub mod lint;
 pub mod short_form;

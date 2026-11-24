@@ -356,15 +356,8 @@ pub fn add_signature(zip: &[u8], key: &SigningKey, limits: Limits) -> Result<Vec
     write_zip(&opened.manifest_bytes, &files, Some(&signature))
 }
 
-/// Checks a bundle's signature against what the reader trusts, in this
-/// order: the signature file parses and its `alg` is known; its publisher is
-/// `expected_publisher`, when given; its key is known and not revoked (at any
-/// date: a revoked key's signatures never verify); the signature verifies.
-/// A retired key still verifies.
-///
-/// An unsigned bundle is [`SignatureStatus::Unverified`], unless the reader
-/// trusts a key of `expected_publisher`, pinned or approved or from a key
-/// set it holds: then it is `unsigned_from_pinned_publisher`.
+/// Checks a bundle's signature against what the reader trusts, as
+/// [`check_signed`] does for `manifest.sig` over the stored manifest.
 ///
 /// This checks the signature only; run [`verify`] for the bundle's own checks.
 pub fn check_signature(
@@ -372,7 +365,32 @@ pub fn check_signature(
     trust: &Trust,
     expected_publisher: Option<&str>,
 ) -> Result<SignatureStatus, Code> {
-    let Some(bytes) = &bundle.signature else {
+    check_signed(
+        bundle.signature.as_deref(),
+        Context::Manifest,
+        &bundle.manifest_bytes,
+        trust,
+        expected_publisher,
+    )
+}
+
+/// Checks a signature file (`manifest.sig` or `feed.sig`) over `message`
+/// against what the reader trusts, in this order: the signature file parses
+/// and its `alg` is known; its publisher is `expected_publisher`, when given;
+/// its key is known and not revoked (at any date: a revoked key's signatures
+/// never verify); the signature verifies. A retired key still verifies.
+///
+/// No signature is [`SignatureStatus::Unverified`], unless the reader
+/// trusts a key of `expected_publisher`, pinned or approved or from a key
+/// set it holds: then it is `unsigned_from_pinned_publisher`.
+pub fn check_signed(
+    signature: Option<&[u8]>,
+    context: Context,
+    message: &[u8],
+    trust: &Trust,
+    expected_publisher: Option<&str>,
+) -> Result<SignatureStatus, Code> {
+    let Some(bytes) = signature else {
         return match expected_publisher {
             Some(publisher) if trust.trusts_publisher(publisher) => {
                 Err(Code::UnsignedFromPinnedPublisher)
@@ -390,7 +408,7 @@ pub fn check_signature(
     if state == KeyState::Revoked {
         return Err(Code::RevokedKey);
     }
-    sign::verify(&key, Context::Manifest, &bundle.manifest_bytes, &file)?;
+    sign::verify(&key, context, message, &file)?;
     Ok(SignatureStatus::Verified {
         publisher: file.publisher,
         key: file.key,
