@@ -927,11 +927,47 @@ mod feed_publish {
             "{refused:?}"
         );
 
-        // With the old key to check feed.sig, both streams are kept.
-        let rotated = publish(
+        // A secret key file is refused, and nothing of it is printed.
+        let old: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&s.key).unwrap()).unwrap();
+        let seed = old["seed"].as_str().unwrap().to_owned();
+        let secret = publish(
             &s,
             "one",
             &[arg("-k"), &new_key, arg("--previous-key"), &s.key],
+        );
+        assert_eq!(secret.status.code(), Some(2), "{secret:?}");
+        let said = format!("{}{}", text(&secret.stdout), text(&secret.stderr));
+        assert!(said.contains("not a key file"), "{said}");
+        assert!(!said.contains(&seed), "{said}");
+        let inline = publish(
+            &s,
+            "one",
+            &[
+                arg("-k"),
+                &new_key,
+                arg("--previous-key"),
+                arg(&old.to_string()),
+            ],
+        );
+        assert_eq!(inline.status.code(), Some(2), "{inline:?}");
+        let said = format!("{}{}", text(&inline.stdout), text(&inline.stderr));
+        assert!(!said.contains(&seed), "{said}");
+
+        // With the old public key to check feed.sig, both streams are kept.
+        let old_public = format!(
+            "acme.example/2026-11={}",
+            legible_records::sign::b64url(
+                &legible_records::sign::SigningKey::from_json(&std::fs::read(&s.key).unwrap())
+                    .unwrap()
+                    .public()
+                    .key
+            )
+        );
+        let rotated = publish(
+            &s,
+            "one",
+            &[arg("-k"), &new_key, arg("--previous-key"), arg(&old_public)],
         );
         assert!(rotated.status.success(), "{rotated:?}");
         let feed = parse_feed(&std::fs::read(s.feed_dir.join("feed.json")).unwrap()).unwrap();
@@ -942,7 +978,6 @@ mod feed_publish {
         assert_eq!(file.key, "2027-03");
 
         // A key of another publisher isn't a previous key.
-        keys_new(&s.temp, "other.json", "other.example", "1");
         let other = publish(
             &s,
             "one",
@@ -950,10 +985,20 @@ mod feed_publish {
                 arg("-k"),
                 &new_key,
                 arg("--previous-key"),
-                &s.temp.path("other.json"),
+                arg(&format!("other.example/1={}", "A".repeat(43))),
             ],
         );
         assert_eq!(other.status.code(), Some(2), "{other:?}");
+        assert!(text(&other.stderr).contains("other.example"), "{other:?}");
+
+        // Text that isn't a public key is refused with the expected shape.
+        let bad = publish(
+            &s,
+            "one",
+            &[arg("-k"), &new_key, arg("--previous-key"), arg("nonsense")],
+        );
+        assert_eq!(bad.status.code(), Some(2), "{bad:?}");
+        assert!(text(&bad.stderr).contains("<publisher>/<id>="), "{bad:?}");
     }
 
     #[test]

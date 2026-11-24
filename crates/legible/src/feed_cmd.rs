@@ -23,7 +23,7 @@ use legible_records::feed::{
 };
 use legible_records::keys::parse_pin_text;
 use legible_records::net::{source_with_limits, HttpsKeySource};
-use legible_records::sign::{self, is_publisher, Context, SignatureFile, SigningKey};
+use legible_records::sign::{self, is_publisher, Context, PublicKey, SignatureFile, SigningKey};
 use legible_records::time::{self, Instant};
 use serde_json::Value;
 
@@ -129,17 +129,18 @@ pub struct PublishArgs {
     /// noted for deletion (with --state), and the new index is dated after the old one.
     #[arg(long, conflicts_with = "withdraw")]
     rebuild: bool,
-    /// After a key rotation: the key file (from `keys new`) of the key that signed the
-    /// existing index. Only its public key is used, to check feed.sig, so the index is
-    /// built on and every stream kept. Don't use it for a key that was revoked: a thief of
-    /// the key may have changed the index, so --rebuild.
+    /// After a key rotation: the public key that signed the existing index, written
+    /// <publisher>/<id>=<public_key> as --approve and --pin take it (never a secret key
+    /// file). It checks feed.sig, so the index is built on and every stream kept. Don't use
+    /// it for a key that was revoked: a thief of the key may have changed the index, so
+    /// --rebuild.
     #[arg(
         long,
-        value_name = "FILE",
+        value_name = "PUBLISHER/ID=PUBLIC_KEY",
         requires = "key",
         conflicts_with = "rebuild"
     )]
-    previous_key: Option<PathBuf>,
+    previous_key: Option<String>,
     /// Record files (.json with $type and version) and attachments, or directories to
     /// publish every file in.
     #[arg(required_unless_present = "withdraw")]
@@ -232,12 +233,12 @@ fn stored_index(dir: &Path) -> Result<Option<(PathBuf, Vec<u8>, bool)>, Stop> {
 /// Whether `dir`'s `feed.sig` is `key`'s signature over the stored index:
 /// what lets a publisher build on an index that whoever can write the
 /// directory might have changed.
-fn index_signed_by(dir: &Path, stored: &[u8], key: &SigningKey) -> Result<bool, Stop> {
+fn index_signed_by(dir: &Path, stored: &[u8], key: &PublicKey) -> Result<bool, Stop> {
     let Some(bytes) = read_optional(&dir.join("feed.sig"))? else {
         return Ok(false);
     };
     Ok(SignatureFile::parse(&bytes)
-        .and_then(|sig| sign::verify(&key.public(), Context::Feed, stored, &sig))
+        .and_then(|sig| sign::verify(key, Context::Feed, stored, &sig))
         .is_ok())
 }
 
@@ -312,6 +313,24 @@ fn later_of(a: String, b: &str) -> String {
     }
 }
 
+/// `--previous-key`: public material only. Nothing the user gave is echoed, so
+/// a secret given by mistake never reaches the output.
+fn parse_previous_key(text: &str) -> Result<PublicKey, Stop> {
+    let looks_secret = text.trim_start().starts_with('{') || Path::new(text).is_file();
+    if looks_secret {
+        return fail(
+            "--previous-key: give the public key as <publisher>/<id>=<public_key>, as --approve takes it, not a key file; the old secret key isn't needed and shouldn't be passed"
+                .to_owned(),
+        );
+    }
+    let pin = parse_pin_text(text).map_err(|e| Stop::Failed(format!("--previous-key: {e}")))?;
+    Ok(PublicKey {
+        publisher: pin.publisher,
+        id: pin.id,
+        key: pin.public_key,
+    })
+}
+
 fn publish(args: PublishArgs) -> Result<(), Stop> {
     // Arguments that can be checked on their own, before anything is read or written.
     if !is_feed_id(&args.feed) {
@@ -339,8 +358,8 @@ fn publish(args: PublishArgs) -> Result<(), Stop> {
         Some(path) => Some(crate::read_key(path)?),
         None => None,
     };
-    let previous_key: Option<SigningKey> = match &args.previous_key {
-        Some(path) => Some(crate::read_key(path)?),
+    let previous_key: Option<PublicKey> = match &args.previous_key {
+        Some(text) => Some(parse_previous_key(text)?),
         None => None,
     };
     if let (Some(key), Some(previous)) = (&key, &previous_key) {
@@ -397,7 +416,7 @@ fn publish(args: PublishArgs) -> Result<(), Stop> {
         Some((path, bytes, encrypted)) => {
             let trusted = match &key {
                 Some(key) => {
-                    index_signed_by(&args.dir, &bytes, key)?
+                    index_signed_by(&args.dir, &bytes, &key.public())?
                         || match &previous_key {
                             Some(previous) => index_signed_by(&args.dir, &bytes, previous)?,
                             None => false,
