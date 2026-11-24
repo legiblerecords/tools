@@ -8,6 +8,7 @@
     "key_sets": [],
     "pins": [
       {
+        "alg": "ed25519",
         "id": "2026-11",
         "public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
         "publisher": "acme.example"

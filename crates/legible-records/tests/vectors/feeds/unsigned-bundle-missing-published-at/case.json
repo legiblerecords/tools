@@ -1,0 +1,25 @@
+{
+  "connection": {
+    "$type": "org.legiblerecords.feed-connection",
+    "auth": {
+      "method": "bearer",
+      "token_env": "ACME_FEED_TOKEN"
+    },
+    "feed": "acme.example/track",
+    "location": {
+      "kind": "https",
+      "url": "https://feeds.acme.example/track/"
+    },
+    "version": 1
+  },
+  "expect": {
+    "index": "ok",
+    "streams": {
+      "access-reviews": "accepted",
+      "incidents": "accepted",
+      "policy-acknowledgments": "missing_published_at"
+    }
+  },
+  "name": "unsigned-bundle-missing-published-at",
+  "state": null
+}

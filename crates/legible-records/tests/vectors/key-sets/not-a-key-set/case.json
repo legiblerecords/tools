@@ -1,0 +1,13 @@
+{
+  "expect": "bad_key_set",
+  "name": "not-a-key-set",
+  "pins": [
+    {
+      "alg": "ed25519",
+      "id": "2025-06",
+      "public_key": "Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc",
+      "publisher": "acme.example"
+    }
+  ],
+  "previous": null
+}

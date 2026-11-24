@@ -16,9 +16,9 @@
         }
       },
       "required": [
-        "sha256",
+        "media_type",
         "name",
-        "media_type"
+        "sha256"
       ],
       "type": "object"
     },
@@ -31,12 +31,19 @@
       "type": "string"
     },
     "domain": {
-      "description": "A publisher, a lowercase domain of two or more labels, with no scheme, port or path.",
-      "pattern": "^(?=.{1,253}$)[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$",
+      "description": "A publisher, a lowercase domain of two or more labels whose last label isn't all digits, with no scheme, port or path. At most 253 characters.",
+      "maxLength": 253,
+      "pattern": "^([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+([0-9]*[a-z]([a-z0-9-]*[a-z0-9])?|[0-9]+-[a-z0-9-]*[a-z0-9])$",
       "type": "string"
     },
     "email": {
       "format": "email",
+      "type": "string"
+    },
+    "feedId": {
+      "description": "A feed's id, <publisher>/<slug>, a domain and a slug. At most 317 characters; a reader also checks that the publisher part is a domain.",
+      "maxLength": 317,
+      "pattern": "^([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+([0-9]*[a-z]([a-z0-9-]*[a-z0-9])?|[0-9]+-[a-z0-9-]*[a-z0-9])\\/[a-z0-9]+(-[a-z0-9]+)*$",
       "type": "string"
     },
     "produced_by": {
@@ -102,5 +109,18 @@
   "$id": "https://legiblerecords.org/schemas/org.legiblerecords.common/v1.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "description": "Definitions every Legible Records type can use.",
-  "title": "common"
+  "properties": {
+    "$type": {
+      "const": "org.legiblerecords.common"
+    },
+    "version": {
+      "const": 1
+    }
+  },
+  "required": [
+    "$type",
+    "version"
+  ],
+  "title": "common",
+  "type": "object"
 }

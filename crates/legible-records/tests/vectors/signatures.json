@@ -103,6 +103,32 @@
         "publisher": "acme.example",
         "signature": "not base64!"
       }
+    },
+    {
+      "context": "manifest",
+      "expect": "unknown_alg",
+      "message_b64": "ewogICIkdHlwZSI6ICJvcmcubGVnaWJsZXJlY29yZHMuYnVuZGxlIiwKICAiZmVlZCI6IHsKICAgICJpZCI6ICJhY21lLmV4YW1wbGUvdHJhY2siLAogICAgInN0cmVhbSI6ICJwb2xpY3ktYWNrbm93bGVkZ21lbnRzIgogIH0sCiAgImZpbGVzIjogW10sCiAgInB1Ymxpc2hlZF9hdCI6ICIyMDI2LTExLTI0VDEwOjAwOjAwWiIsCiAgInZlcnNpb24iOiAxCn0K",
+      "name": "unknown-alg-other-length",
+      "public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+      "signature_file": {
+        "alg": "rsa",
+        "key": "2026-11",
+        "publisher": "acme.example",
+        "signature": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      }
+    },
+    {
+      "context": "manifest",
+      "expect": "bad_signature_file",
+      "message_b64": "ewogICIkdHlwZSI6ICJvcmcubGVnaWJsZXJlY29yZHMuYnVuZGxlIiwKICAiZmVlZCI6IHsKICAgICJpZCI6ICJhY21lLmV4YW1wbGUvdHJhY2siLAogICAgInN0cmVhbSI6ICJwb2xpY3ktYWNrbm93bGVkZ21lbnRzIgogIH0sCiAgImZpbGVzIjogW10sCiAgInB1Ymxpc2hlZF9hdCI6ICIyMDI2LTExLTI0VDEwOjAwOjAwWiIsCiAgInZlcnNpb24iOiAxCn0K",
+      "name": "non-canonical-signature",
+      "public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+      "signature_file": {
+        "alg": "ed25519",
+        "key": "2026-11",
+        "publisher": "acme.example",
+        "signature": "K3K5XFHVNVn3d51HVDIPgM6tAnfYuFjH_-eImF6ev9S9z1ETdnWfRoUtzUd92VkYgMCFVAl4XNLWZb_H0J02AR"
+      }
     }
   ]
 }
