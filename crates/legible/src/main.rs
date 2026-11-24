@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use clap::{Args, Parser, Subcommand};
 use legible_records::bundle::{self, Input, Limits};
 use legible_records::short_form::{self, Options};
+use legible_records::sign::SignatureFile;
 use legible_records::validate::Schemas;
 use legible_records::{compat, lint, COMMON_V1_ID};
 use serde_json::Value;
@@ -280,8 +281,15 @@ fn run_bundle(command: BundleCommand) -> Result<(), Stop> {
         } => {
             let bodies = load_schemas(&schemas, &schema)?;
             let mut files = Vec::new();
+            let mut skipped = Vec::new();
             for path in &inputs {
-                collect(path, &mut files)?;
+                collect(path, true, &mut files, &mut skipped)?;
+            }
+            if !skipped.is_empty() {
+                eprintln!(
+                    "skipped {}: packing writes a new manifest, so the result is a new, unsigned bundle, not the one these came from",
+                    skipped.join(", ")
+                );
             }
             let produced_by = serde_json::json!({
                 "app": "legible",
@@ -325,9 +333,14 @@ fn run_bundle(command: BundleCommand) -> Result<(), Stop> {
                     directory.display()
                 )));
             }
-            let manifest =
-                serde_json::to_vec_pretty(&opened.manifest).expect("JSON values serialize");
-            let files = std::iter::once((bundle::MANIFEST, &manifest))
+            // The manifest and signature as stored: a signature covers these exact bytes.
+            let files = std::iter::once((bundle::MANIFEST, &opened.manifest_bytes))
+                .chain(
+                    opened
+                        .signature
+                        .as_ref()
+                        .map(|bytes| (bundle::SIGNATURE, bytes)),
+                )
                 .chain(opened.files.iter().map(|(p, b)| (p.as_str(), b)));
             for (relative, bytes) in files {
                 let target = directory.join(relative);
@@ -349,8 +362,15 @@ fn run_bundle(command: BundleCommand) -> Result<(), Stop> {
 }
 
 /// Reads a file, or every regular file under a directory, as bundle inputs.
-/// Symbolic links are skipped.
-fn collect(path: &Path, out: &mut Vec<Input>) -> Result<(), Stop> {
+/// Symbolic links are skipped. A `manifest.json` or `manifest.sig` among the
+/// inputs themselves or directly in a directory given as one (an unpacked
+/// bundle's own) isn't packed: its path is added to `skipped`.
+fn collect(
+    path: &Path,
+    top: bool,
+    out: &mut Vec<Input>,
+    skipped: &mut Vec<String>,
+) -> Result<(), Stop> {
     let failed = |e: std::io::Error| Stop::Failed(format!("{}: {e}", path.display()));
     let kind = std::fs::symlink_metadata(path).map_err(failed)?.file_type();
     if kind.is_dir() {
@@ -361,13 +381,18 @@ fn collect(path: &Path, out: &mut Vec<Input>) -> Result<(), Stop> {
             .map_err(failed)?;
         entries.sort();
         for entry in entries {
-            collect(&entry, out)?;
+            // Only the directory's own files can be a bundle's manifest or signature.
+            collect(&entry, top && !entry.is_dir(), out, skipped)?;
         }
     } else if kind.is_file() {
         let name = path
             .file_name()
             .and_then(|n| n.to_str())
             .ok_or_else(|| Stop::Failed(format!("{}: not a UTF-8 file name", path.display())))?;
+        if top && (name == bundle::MANIFEST || name == bundle::SIGNATURE) {
+            skipped.push(path.display().to_string());
+            return Ok(());
+        }
         out.push(Input {
             name: name.to_owned(),
             bytes: std::fs::read(path).map_err(failed)?,
@@ -431,7 +456,28 @@ fn verify_bundle(
             path.display()
         );
     }
-    outcome(report.problems.is_empty())
+    let (status, valid) = signature_status(opened);
+    println!("{}: {status}", path.display());
+    outcome(report.problems.is_empty() && valid)
+}
+
+/// What to say about a bundle's signature. Nothing here checks it: trusted
+/// keys aren't given to `bundle verify` yet, so a signed bundle is `unverified` too.
+/// The flag is false for a signature file that isn't the JSON the spec defines.
+fn signature_status(opened: &bundle::Opened) -> (String, bool) {
+    match &opened.signature {
+        None => ("unverified (not signed)".to_owned(), true),
+        Some(bytes) => match SignatureFile::parse(bytes) {
+            Ok(sig) => (
+                format!(
+                "unverified (signed by {} with key {}; no trusted keys given, so the signature wasn't checked)",
+                sig.publisher, sig.key
+                ),
+                true,
+            ),
+            Err(code) => (format!("{}: manifest.sig", code.as_str()), false),
+        },
+    }
 }
 
 fn outcome(ok: bool) -> Result<(), Stop> {

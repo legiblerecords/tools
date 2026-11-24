@@ -381,4 +381,11 @@ impl Trust {
             .chain(&self.approved)
             .any(|pin| pin.publisher == publisher)
     }
+
+    /// Whether the reader trusts a key of this publisher: pinned, approved,
+    /// or in a key set it holds. A reader that does refuses this publisher's
+    /// unsigned bundles and feed indexes.
+    pub fn trusts_publisher(&self, publisher: &str) -> bool {
+        self.pins_publisher(publisher) || self.key_sets.contains_key(publisher)
+    }
 }

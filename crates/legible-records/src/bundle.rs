@@ -3,18 +3,27 @@
 //!
 //! [`pack`] builds a bundle from files; [`open`] reads one back, refusing
 //! unsafe paths and oversized contents; [`verify`] checks hashes, the file
-//! list and references. Encryption is a separate step around the zip.
+//! list and references. A bundle may carry `manifest.sig`, a signature over
+//! the manifest's stored bytes: [`pack_with`] and [`add_signature`] write it
+//! and [`check_signature`] reads it. Encryption is a separate step around
+//! the zip.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Read, Write};
 
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
+
+use crate::code::Code;
+use crate::keys::{KeyState, Lookup, Trust};
+use crate::sign::{self, Context, SignatureFile, SigningKey};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, DateTime, ZipArchive, ZipWriter};
 
 /// The manifest's own path in a bundle.
 pub const MANIFEST: &str = "manifest.json";
+/// The manifest signature's path in a bundle.
+pub const SIGNATURE: &str = "manifest.sig";
 /// The manifest's type.
 pub const BUNDLE_TYPE: &str = "org.legiblerecords.bundle";
 
@@ -58,11 +67,37 @@ pub struct Packed {
     pub attachments: Vec<Attachment>,
 }
 
-/// An opened bundle: its manifest, and every other file by path.
+/// An opened bundle: its manifest (parsed, and as stored, which is what a
+/// signature covers), its signature if it has one, and every other file by
+/// path. `files` holds neither `manifest.json` nor `manifest.sig`.
 #[derive(Clone, Debug)]
 pub struct Opened {
     pub manifest: Value,
+    pub manifest_bytes: Vec<u8>,
+    pub signature: Option<Vec<u8>>,
     pub files: BTreeMap<String, Vec<u8>>,
+}
+
+/// What [`pack_with`] adds to a bundle beyond its files.
+#[derive(Default)]
+pub struct PackOptions<'a> {
+    /// The manifest's `produced_by`.
+    pub produced_by: Option<Value>,
+    /// The manifest's `published_at`, an RFC 3339 instant.
+    pub published_at: Option<String>,
+    /// The feed id and stream id the bundle is published under.
+    pub feed: Option<(String, String)>,
+    /// Signs the manifest, writing `manifest.sig`.
+    pub signer: Option<&'a SigningKey>,
+}
+
+/// What [`check_signature`] found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SignatureStatus {
+    /// Signed by a trusted key that is active or retired.
+    Verified { publisher: String, key: String },
+    /// Not signed, and from no publisher the reader trusts.
+    Unverified,
 }
 
 /// What [`verify`] found.
@@ -160,6 +195,20 @@ pub fn pack(
     schemas: &[Value],
     produced_by: Option<Value>,
 ) -> Result<Packed, Vec<String>> {
+    let options = PackOptions {
+        produced_by,
+        ..PackOptions::default()
+    };
+    pack_with(inputs, schemas, &options)
+}
+
+/// [`pack`] with the rest of what a manifest may say, and optionally a
+/// signature over it.
+pub fn pack_with(
+    inputs: &[Input],
+    schemas: &[Value],
+    options: &PackOptions,
+) -> Result<Packed, Vec<String>> {
     let mut problems = Vec::new();
     let mut files: BTreeMap<String, (Vec<u8>, Map<String, Value>)> = BTreeMap::new();
     let mut attachments = Vec::new();
@@ -234,9 +283,39 @@ pub fn pack(
         })
         .collect();
     let mut manifest = json!({"$type": BUNDLE_TYPE, "version": 1, "files": listed});
-    if let Some(produced_by) = produced_by {
-        manifest["produced_by"] = produced_by;
+    if let Some(produced_by) = &options.produced_by {
+        manifest["produced_by"] = produced_by.clone();
     }
+    if let Some(published_at) = &options.published_at {
+        manifest["published_at"] = json!(published_at);
+    }
+    if let Some((id, stream)) = &options.feed {
+        manifest["feed"] = json!({"id": id, "stream": stream});
+    }
+    let manifest_bytes = canonical_record(&manifest);
+    let signature = options
+        .signer
+        .map(|key| sign::sign(key, Context::Manifest, &manifest_bytes).to_bytes());
+    let stored: BTreeMap<&str, &[u8]> = files
+        .iter()
+        .map(|(path, (bytes, _))| (path.as_str(), bytes.as_slice()))
+        .collect();
+    let zip = write_zip(&manifest_bytes, &stored, signature.as_deref())?;
+    Ok(Packed {
+        zip,
+        manifest,
+        attachments,
+    })
+}
+
+/// Writes the zip: the manifest, the files in path order, then the
+/// signature. The same entries and options every time, so the same inputs
+/// give the same bytes.
+fn write_zip(
+    manifest_bytes: &[u8],
+    files: &BTreeMap<&str, &[u8]>,
+    signature: Option<&[u8]>,
+) -> Result<Vec<u8>, Vec<String>> {
     let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
     let options = SimpleFileOptions::default()
         .compression_method(CompressionMethod::Deflated)
@@ -247,18 +326,74 @@ pub fn pack(
             .and_then(|()| writer.write_all(bytes).map_err(Into::into))
             .map_err(|e| format!("{path}: {e}"))
     };
-    write(MANIFEST, &canonical_record(&manifest)).map_err(|e| vec![e])?;
-    for (path, (bytes, _)) in &files {
+    write(MANIFEST, manifest_bytes).map_err(|e| vec![e])?;
+    for (path, bytes) in files {
         write(path, bytes).map_err(|e| vec![e])?;
     }
-    let zip = writer
+    if let Some(signature) = signature {
+        write(SIGNATURE, signature).map_err(|e| vec![e])?;
+    }
+    Ok(writer
         .finish()
         .map_err(|e| vec![format!("zip: {e}")])?
-        .into_inner();
-    Ok(Packed {
-        zip,
-        manifest,
-        attachments,
+        .into_inner())
+}
+
+/// Adds `manifest.sig` to a bundle's zip, signing its manifest as stored.
+/// Everything else is written as [`pack`] writes it. A bundle that already
+/// has a signature is refused: sign the bundle once, or pack it again.
+pub fn add_signature(zip: &[u8], key: &SigningKey, limits: Limits) -> Result<Vec<u8>, Vec<String>> {
+    let opened = open(zip, limits)?;
+    if opened.signature.is_some() {
+        return Err(vec![format!("{SIGNATURE}: the bundle is already signed")]);
+    }
+    let signature = sign::sign(key, Context::Manifest, &opened.manifest_bytes).to_bytes();
+    let files: BTreeMap<&str, &[u8]> = opened
+        .files
+        .iter()
+        .map(|(path, bytes)| (path.as_str(), bytes.as_slice()))
+        .collect();
+    write_zip(&opened.manifest_bytes, &files, Some(&signature))
+}
+
+/// Checks a bundle's signature against what the reader trusts, in this
+/// order: the signature file parses and its `alg` is known; its publisher is
+/// `expected_publisher`, when given; its key is known and not revoked (at any
+/// date: a revoked key's signatures never verify); the signature verifies.
+/// A retired key still verifies.
+///
+/// An unsigned bundle is [`SignatureStatus::Unverified`], unless the reader
+/// trusts a key of `expected_publisher`, pinned or approved or from a key
+/// set it holds: then it is `unsigned_from_pinned_publisher`.
+///
+/// This checks the signature only; run [`verify`] for the bundle's own checks.
+pub fn check_signature(
+    bundle: &Opened,
+    trust: &Trust,
+    expected_publisher: Option<&str>,
+) -> Result<SignatureStatus, Code> {
+    let Some(bytes) = &bundle.signature else {
+        return match expected_publisher {
+            Some(publisher) if trust.trusts_publisher(publisher) => {
+                Err(Code::UnsignedFromPinnedPublisher)
+            }
+            _ => Ok(SignatureStatus::Unverified),
+        };
+    };
+    let file = SignatureFile::parse(bytes)?;
+    if expected_publisher.is_some_and(|publisher| publisher != file.publisher) {
+        return Err(Code::PublisherMismatch);
+    }
+    let Lookup::Found(key, state) = trust.lookup(&file.publisher, &file.key) else {
+        return Err(Code::UnknownKey);
+    };
+    if state == KeyState::Revoked {
+        return Err(Code::RevokedKey);
+    }
+    sign::verify(&key, Context::Manifest, &bundle.manifest_bytes, &file)?;
+    Ok(SignatureStatus::Verified {
+        publisher: file.publisher,
+        key: file.key,
     })
 }
 
@@ -329,6 +464,7 @@ pub fn open(zip: &[u8], limits: Limits) -> Result<Opened, Vec<String>> {
             problems.push(format!("{path}: appears twice"));
         }
     }
+    let signature = files.remove(SIGNATURE);
     let Some(manifest_bytes) = files.remove(MANIFEST) else {
         problems.push(format!("no {MANIFEST}"));
         return Err(problems);
@@ -341,7 +477,12 @@ pub fn open(zip: &[u8], limits: Limits) -> Result<Opened, Vec<String>> {
         }
     };
     if problems.is_empty() {
-        Ok(Opened { manifest, files })
+        Ok(Opened {
+            manifest,
+            manifest_bytes,
+            signature,
+            files,
+        })
     } else {
         Err(problems)
     }

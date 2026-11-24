@@ -1,0 +1,256 @@
+//! Signed bundles: the spec's bundle vectors, and packing with a signer.
+
+use std::io::{Cursor, Read};
+
+use legible_records::bundle::{
+    add_signature, check_signature, open, pack, pack_with, verify, Input, Limits, PackOptions,
+    SignatureStatus, SIGNATURE,
+};
+use legible_records::code::Code;
+use legible_records::keys::{KeySet, Pin, Trust};
+use legible_records::sign::{from_b64url, SigningKey};
+use serde_json::{json, Value};
+
+/// A test-only seed. Never use it for anything real.
+const TEST_SEED: [u8; 32] = [7; 32];
+
+fn trust_from(value: &Value) -> Trust {
+    let mut trust = Trust::default();
+    for p in value["pins"].as_array().expect("pins") {
+        trust.pins.push(Pin {
+            publisher: p["publisher"].as_str().unwrap().to_owned(),
+            id: p["id"].as_str().unwrap().to_owned(),
+            public_key: from_b64url(p["public_key"].as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        });
+    }
+    for set in value["key_sets"].as_array().expect("key_sets") {
+        let parsed = KeySet::parse(&serde_json::to_vec(set).unwrap()).expect("key set parses");
+        trust.key_sets.insert(parsed.publisher.clone(), parsed);
+    }
+    trust
+}
+
+#[test]
+fn signed_bundle_vectors() {
+    let dir = format!("{}/tests/vectors/bundles", env!("CARGO_MANIFEST_DIR"));
+    let mut count = 0;
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        let case: Value =
+            serde_json::from_slice(&std::fs::read(path.join("case.json")).unwrap()).unwrap();
+        let name = case["name"].as_str().unwrap();
+        let zip = std::fs::read(path.join("bundle.zip")).unwrap();
+        let trust = trust_from(&case["trust"]);
+        let expected = case["expected_publisher"].as_str();
+        let opened = open(&zip, Limits::default()).unwrap_or_else(|p| panic!("{name}: {p:?}"));
+        // The signature is checked before the bundle's own checks.
+        let got = match check_signature(&opened, &trust, expected) {
+            Err(code) => json!({"error": code.as_str()}),
+            Ok(_) if !verify(&opened, &[]).problems.is_empty() => {
+                json!({"error": Code::BadBundle.as_str()})
+            }
+            Ok(SignatureStatus::Verified { publisher, key }) => {
+                json!({"status": "verified", "publisher": publisher, "key": key})
+            }
+            Ok(SignatureStatus::Unverified) => json!({"status": "unverified"}),
+        };
+        assert_eq!(got, case["expect"], "{name}");
+        count += 1;
+    }
+    assert!(count >= 10, "only {count} bundle vectors");
+}
+
+fn key() -> SigningKey {
+    SigningKey::from_seed("acme.example", "2026-11", TEST_SEED).unwrap()
+}
+
+fn trusting(key: &SigningKey) -> Trust {
+    let public = key.public();
+    Trust {
+        pins: vec![Pin {
+            publisher: public.publisher,
+            id: public.id,
+            public_key: public.key,
+        }],
+        ..Trust::default()
+    }
+}
+
+fn inputs() -> Vec<Input> {
+    vec![
+        Input {
+            name: "mfa.json".to_owned(),
+            bytes: br#"{"$type":"tech.monorail.controls.control","version":1,"id":"mfa","title":"MFA"}"#.to_vec(),
+        },
+        Input {
+            name: "review.pdf".to_owned(),
+            bytes: b"%PDF-1.4 invented".to_vec(),
+        },
+    ]
+}
+
+fn options(signer: Option<&SigningKey>) -> PackOptions<'_> {
+    PackOptions {
+        produced_by: Some(json!({"app": "test"})),
+        published_at: Some("2026-11-24T10:00:00Z".to_owned()),
+        feed: Some(("acme.example/controls".to_owned(), "main".to_owned())),
+        signer,
+    }
+}
+
+#[test]
+fn pack_with_signer_verifies() {
+    let key = key();
+    let packed = pack_with(&inputs(), &[], &options(Some(&key))).unwrap();
+    assert_eq!(packed.manifest["published_at"], "2026-11-24T10:00:00Z");
+    assert_eq!(
+        packed.manifest["feed"],
+        json!({"id": "acme.example/controls", "stream": "main"})
+    );
+    let opened = open(&packed.zip, Limits::default()).unwrap();
+    assert!(opened.signature.is_some());
+    assert!(!opened.files.contains_key(SIGNATURE));
+    assert_eq!(
+        check_signature(&opened, &trusting(&key), Some("acme.example")),
+        Ok(SignatureStatus::Verified {
+            publisher: "acme.example".to_owned(),
+            key: "2026-11".to_owned()
+        })
+    );
+    // Another key under the same id doesn't verify.
+    let other = SigningKey::from_seed("acme.example", "2026-11", [8; 32]).unwrap();
+    assert_eq!(
+        check_signature(&opened, &trusting(&other), Some("acme.example")),
+        Err(Code::BadSignature)
+    );
+}
+
+#[test]
+fn add_signature_matches_pack_with_signer() {
+    let key = key();
+    let plain = pack_with(&inputs(), &[], &options(None)).unwrap();
+    let signed = add_signature(&plain.zip, &key, Limits::default()).unwrap();
+    let direct = pack_with(&inputs(), &[], &options(Some(&key))).unwrap();
+    assert_eq!(signed, direct.zip);
+}
+
+#[test]
+fn add_signature_twice_is_refused() {
+    let key = key();
+    let packed = pack_with(&inputs(), &[], &options(Some(&key))).unwrap();
+    let problems = add_signature(&packed.zip, &key, Limits::default()).unwrap_err();
+    assert!(
+        problems.iter().any(|p| p.contains("already signed")),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn manifest_sig_is_not_an_unlisted_file() {
+    let key = key();
+    let packed = pack_with(&inputs(), &[], &options(Some(&key))).unwrap();
+    let opened = open(&packed.zip, Limits::default()).unwrap();
+    assert_eq!(verify(&opened, &[]).problems, Vec::<String>::new());
+    let mut zip = zip::ZipArchive::new(Cursor::new(&packed.zip)).unwrap();
+    let mut sig = Vec::new();
+    zip.by_name(SIGNATURE)
+        .unwrap()
+        .read_to_end(&mut sig)
+        .unwrap();
+    assert_eq!(opened.signature, Some(sig));
+}
+
+#[test]
+fn pack_is_unsigned_and_unverified() {
+    let packed = pack(&inputs(), &[], None).unwrap();
+    let opened = open(&packed.zip, Limits::default()).unwrap();
+    assert_eq!(opened.signature, None);
+    assert_eq!(
+        check_signature(&opened, &Trust::default(), None),
+        Ok(SignatureStatus::Unverified)
+    );
+}
+
+#[test]
+fn unsigned_from_a_trusted_publisher_is_refused() {
+    let key = key();
+    let packed = pack_with(&inputs(), &[], &options(None)).unwrap();
+    let opened = open(&packed.zip, Limits::default()).unwrap();
+    // Pinned.
+    assert_eq!(
+        check_signature(&opened, &trusting(&key), Some("acme.example")),
+        Err(Code::UnsignedFromPinnedPublisher)
+    );
+    // Approved.
+    let mut approved = trusting(&key);
+    approved.approved = std::mem::take(&mut approved.pins);
+    assert_eq!(
+        check_signature(&opened, &approved, Some("acme.example")),
+        Err(Code::UnsignedFromPinnedPublisher)
+    );
+    // A held key set, with no pin.
+    let set = KeySet::parse(
+        &serde_json::to_vec(&json!({
+            "$type": "org.legiblerecords.keys",
+            "version": 1,
+            "publisher": "acme.example",
+            "updated_at": "2026-11-24T00:00:00Z",
+            "keys": [{"id": "2026-11", "alg": "ed25519",
+                      "public_key": legible_records::sign::b64url(&key.public().key),
+                      "created_at": "2026-11-24T00:00:00Z"}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut held = Trust::default();
+    held.key_sets.insert("acme.example".to_owned(), set);
+    assert_eq!(
+        check_signature(&opened, &held, Some("acme.example")),
+        Err(Code::UnsignedFromPinnedPublisher)
+    );
+    // Another publisher's trust doesn't matter, nor does having no expectation.
+    assert_eq!(
+        check_signature(&opened, &held, Some("other.example")),
+        Ok(SignatureStatus::Unverified)
+    );
+    assert_eq!(
+        check_signature(&opened, &held, None),
+        Ok(SignatureStatus::Unverified)
+    );
+}
+
+#[test]
+fn signature_checks_run_in_order() {
+    let key = key();
+    let signed = pack_with(&inputs(), &[], &options(Some(&key))).unwrap();
+    let mut opened = open(&signed.zip, Limits::default()).unwrap();
+    let trust = trusting(&key);
+    // Publisher mismatch is found before the key is looked up.
+    assert_eq!(
+        check_signature(&opened, &Trust::default(), Some("other.example")),
+        Err(Code::PublisherMismatch)
+    );
+    assert_eq!(
+        check_signature(&opened, &Trust::default(), Some("acme.example")),
+        Err(Code::UnknownKey)
+    );
+    opened.signature = Some(b"{}".to_vec());
+    assert_eq!(
+        check_signature(&opened, &trust, Some("other.example")),
+        Err(Code::BadSignatureFile)
+    );
+    opened.signature = Some(
+        format!(
+            r#"{{"alg":"rsa","publisher":"acme.example","key":"2026-11","signature":"{}"}}"#,
+            "A".repeat(86)
+        )
+        .into_bytes(),
+    );
+    assert_eq!(
+        check_signature(&opened, &trust, Some("other.example")),
+        Err(Code::UnknownAlg)
+    );
+}
