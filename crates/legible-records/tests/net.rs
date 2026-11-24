@@ -423,8 +423,9 @@ fn url_decode(text: &str) -> String {
 
 #[test]
 fn oauth_token_refetched_when_expiring() {
-    // Good for 62 s: refetched once fewer than 60 s remain, two seconds on.
-    let server = oauth_server(62);
+    // Good for 4 s: the margin is half that (it is 60 s for tokens good for
+    // two minutes or more), so it is fetched again two seconds on.
+    let server = oauth_server(4);
     let conn = oauth_connection(&server);
     let mut src = source(&conn, &env_with(&[("FEED_SECRET", "invented-secret")])).unwrap();
     let first = run(&mut *src, &mut NoKeySource, &conn, None, None);
@@ -438,6 +439,87 @@ fn oauth_token_refetched_when_expiring() {
         "{second:?}"
     );
     assert_eq!(server.count("POST", "/token"), 2);
+}
+
+#[test]
+fn short_lived_oauth_token_is_reused_within_half_its_life() {
+    // Good for 10 s, less than the 60 s margin: still reused, not fetched
+    // again for every request.
+    let server = oauth_server(10);
+    let conn = oauth_connection(&server);
+    let mut src = source(&conn, &env_with(&[("FEED_SECRET", "invented-secret")])).unwrap();
+    for _ in 0..2 {
+        let report = run(&mut *src, &mut NoKeySource, &conn, None, None);
+        assert_eq!(
+            report.streams["notes"],
+            StreamOutcome::Accepted,
+            "{report:?}"
+        );
+    }
+    assert_eq!(server.count("POST", "/token"), 1);
+}
+
+#[test]
+fn oauth_huge_expires_in_does_not_panic() {
+    // u64::MAX seconds can't be added to an Instant: held with no expiry.
+    let server = oauth_server(u64::MAX);
+    let conn = oauth_connection(&server);
+    let mut src = source(&conn, &env_with(&[("FEED_SECRET", "invented-secret")])).unwrap();
+    for _ in 0..2 {
+        let report = run(&mut *src, &mut NoKeySource, &conn, None, None);
+        assert_eq!(
+            report.streams["notes"],
+            StreamOutcome::Accepted,
+            "{report:?}"
+        );
+    }
+    assert_eq!(server.count("POST", "/token"), 1);
+}
+
+#[test]
+fn redirect_drops_authorization() {
+    let target = serve(|_| Reply::ok(b"{}".to_vec()));
+    let location = format!("{}/track/feed.json", target.origin);
+    let origin = serve(move |_| Reply::status(302).header("Location", &location));
+    let conn = https_connection(
+        &origin,
+        json!({"method": "bearer", "token_env": "FEED_TOKEN"}),
+    );
+    let mut src = source(&conn, &env_with(&[("FEED_TOKEN", "invented-token")])).unwrap();
+    assert_eq!(
+        src.get("feed.json", None).unwrap(),
+        Fetched::Found {
+            bytes: b"{}".to_vec(),
+            etag: None
+        }
+    );
+    assert_eq!(
+        origin.requests()[0].header("Authorization"),
+        Some("Bearer invented-token")
+    );
+    let followed = target.requests();
+    assert_eq!(followed.len(), 1);
+    assert_eq!(followed[0].header("Authorization"), None);
+}
+
+#[test]
+fn token_request_does_not_follow_redirects() {
+    let target =
+        serve(|_| Reply::ok(br#"{"access_token":"stolen","token_type":"Bearer"}"#.to_vec()));
+    let location = format!("{}/token", target.origin);
+    let token_server = serve(move |_| Reply::status(307).header("Location", &location));
+    let conn = https_connection(
+        &token_server,
+        json!({"method": "oauth-client-credentials",
+            "token_url": format!("{}/token", token_server.origin),
+            "client_id": "reader", "client_secret_env": "FEED_SECRET"}),
+    );
+    let mut src = source(&conn, &env_with(&[("FEED_SECRET", "invented-secret")])).unwrap();
+    let e = src.get("feed.json", None).unwrap_err();
+    assert!(e.contains("307"), "{e}");
+    assert!(!e.contains("invented-secret"), "{e}");
+    assert_eq!(token_server.count("POST", "/token"), 1);
+    assert!(target.requests().is_empty(), "{:?}", target.requests());
 }
 
 #[test]
@@ -674,18 +756,18 @@ fn key_source_fetches_set_and_sig() {
     let set = key_set_bytes(&[&key_a()]);
     let sig = sign(&key_a(), Context::Keys, &set).to_bytes();
     let server = key_server(Reply::ok(set.clone()), Reply::ok(sig.clone()));
-    let mut keys = HttpsKeySource::with_base(&server.origin);
+    let mut keys = HttpsKeySource::with_base(&server.origin).unwrap();
     assert_eq!(
         keys.key_set("acme.example").unwrap(),
         Some((set.clone(), Some(sig)))
     );
 
     let server = key_server(Reply::ok(set.clone()), Reply::status(404));
-    let mut keys = HttpsKeySource::with_base(&server.origin);
+    let mut keys = HttpsKeySource::with_base(&server.origin).unwrap();
     assert_eq!(keys.key_set("acme.example").unwrap(), Some((set, None)));
 
     let server = key_server(Reply::status(404), Reply::status(404));
-    let mut keys = HttpsKeySource::with_base(&server.origin);
+    let mut keys = HttpsKeySource::with_base(&server.origin).unwrap();
     assert_eq!(keys.key_set("acme.example").unwrap(), None);
     assert_eq!(
         server.count("GET", "/.well-known/legible-records/keys.sig"),
@@ -693,12 +775,12 @@ fn key_source_fetches_set_and_sig() {
     );
 
     // Not a domain: refused before anything is fetched.
-    let mut keys = HttpsKeySource::with_base(&server.origin);
+    let mut keys = HttpsKeySource::with_base(&server.origin).unwrap();
     assert!(keys.key_set("acme.example/evil?").is_err());
 
     let big = vec![b' '; MAX_INDEX_BYTES as usize + 1];
     let server = key_server(Reply::ok(big), Reply::status(404));
-    let mut keys = HttpsKeySource::with_base(&server.origin);
+    let mut keys = HttpsKeySource::with_base(&server.origin).unwrap();
     assert!(keys.key_set("acme.example").is_err());
 }
 
@@ -717,7 +799,7 @@ fn key_set_unreachable_uses_cache() {
         .key_sets
         .insert("acme.example".to_owned(), held.clone());
     let mut src = source(&conn, &no_env).unwrap();
-    let mut keys = HttpsKeySource::with_base(&keys_server.origin);
+    let mut keys = HttpsKeySource::with_base(&keys_server.origin).unwrap();
     let report = run(&mut *src, &mut keys, &conn, Some(&mut state), None);
     assert_eq!(report.index, IndexOutcome::Accepted, "{report:?}");
     assert_eq!(report.streams["notes"], StreamOutcome::Accepted);
@@ -741,7 +823,7 @@ fn key_set_unreachable_no_cache_is_unknown_key() {
     let conn = https_connection(&feed, json!({"method": "none"}));
     let mut state = ReaderState::default();
     let mut src = source(&conn, &no_env).unwrap();
-    let mut keys = HttpsKeySource::with_base(&keys_server.origin);
+    let mut keys = HttpsKeySource::with_base(&keys_server.origin).unwrap();
     let report = run(&mut *src, &mut keys, &conn, Some(&mut state), None);
     assert_eq!(report.index, IndexOutcome::Refused(Code::UnknownKey));
     assert_eq!(state, ReaderState::default());
@@ -769,7 +851,12 @@ fn s3_prefix_slash_normalized_locally() {
         }
     });
     let env = env_with(&[("S3_KEY", "invented-key"), ("S3_SECRET", "invented-secret")]);
-    for prefix in ["feeds/track", "feeds/track/", "feeds/track//"] {
+    for prefix in [
+        "feeds/track",
+        "feeds/track/",
+        "feeds/track//",
+        "/feeds/track/",
+    ] {
         let conn = s3_connection(&server.origin, "acme-legible", prefix);
         let mut src = source(&conn, &env).unwrap();
         assert_eq!(
@@ -789,7 +876,7 @@ fn s3_prefix_slash_normalized_locally() {
         .iter()
         .filter(|r| r.path().ends_with("feed.json"))
         .collect();
-    assert_eq!(gets.len(), 3);
+    assert_eq!(gets.len(), 4);
     for get in gets {
         assert!(get.url.contains("X-Amz-Signature="), "{}", get.url);
         assert!(get.url.contains("X-Amz-Expires=60"), "{}", get.url);
@@ -804,6 +891,31 @@ fn s3_prefix_slash_normalized_locally() {
         server.requests().last().unwrap().path(),
         "/acme-legible/feed.json"
     );
+}
+
+#[test]
+fn s3_403_says_the_key_may_not_list() {
+    let server = serve(|_| Reply::status(403));
+    let env = env_with(&[("S3_KEY", "invented-key"), ("S3_SECRET", "invented-secret")]);
+    let conn = s3_connection(&server.origin, "acme-legible", "feeds/track");
+    let mut src = source(&conn, &env).unwrap();
+    let e = src.get("feed.json.age", None).unwrap_err();
+    assert_eq!(
+        e,
+        "HTTP 403 (not authorized; S3 also answers 403 for a missing object when the key can't list the bucket)"
+    );
+    // An https feed's 403 has no S3 hint.
+    let conn = https_connection(&server, json!({"method": "none"}));
+    let e = source(&conn, &no_env)
+        .unwrap()
+        .get("feed.json", None)
+        .unwrap_err();
+    assert_eq!(e, "HTTP 403 (not authorized)");
+}
+
+#[test]
+fn key_source_origin_must_be_a_url() {
+    assert!(HttpsKeySource::with_base("not a url").is_err());
 }
 
 #[test]

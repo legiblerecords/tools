@@ -3,16 +3,22 @@
 //! [`HttpsKeySource`] for publishers' key sets (`records.md` § Key sets).
 //!
 //! - `https` locations, with `none`, `bearer` or `oauth-client-credentials`
-//!   auth. An OAuth token is held in memory only, and fetched again within
-//!   60 seconds of expiring, or when the feed answers 401.
+//!   auth. An OAuth token is held in memory only, and fetched again when
+//!   less than 60 seconds (or half its lifetime, if that is shorter) is
+//!   left, or when the feed answers 401.
 //! - `s3` locations, with `s3` auth (each GET presigned for 60 seconds) or
-//!   `none` (a public bucket). A missing object must answer 404, which S3
-//!   does only when the access key may list the prefix: without that it
-//!   answers 403, an error, and a plain feed's `feed.json.age` probe fails.
+//!   `none` (a public bucket). The access key needs `s3:ListBucket` on the
+//!   prefix as well as `s3:GetObject`: a reader asks for files that may not
+//!   be there (`feed.json.age` beside `feed.json`, `feed.sig`), and S3
+//!   answers 404 for a missing object only to a key that may list the
+//!   bucket; to any other it answers 403, which is an error.
 //!
 //! Requests honour `HTTPS_PROXY` (and `ALL_PROXY`, `HTTP_PROXY`, `NO_PROXY`),
 //! except to a loopback host, which is always reached directly. Server
-//! certificates are checked with the platform's verifier.
+//! certificates are checked with the platform's verifier. Redirects are
+//! followed for https only, and never carry the `Authorization` header;
+//! the OAuth token request follows none, so the client secret goes only to
+//! `token_url`.
 //!
 //! Every body is read with a cap: [`MAX_INDEX_BYTES`] for the index, its
 //! signature and key sets, and [`Limits::max_stored_bytes`] for bundles.
@@ -21,11 +27,13 @@
 
 use std::time::{Duration, Instant};
 
+use ureq::config::RedirectAuthHeaders;
 use ureq::tls::{RootCerts, TlsConfig};
 use ureq::{Agent, Proxy};
 use zeroize::Zeroizing;
 
 use crate::bundle::{is_safe_path, Limits};
+use crate::feed::connection::is_loopback;
 use crate::feed::{Auth, Connection, Fetched, KeySetFiles, KeySource, Location, Source};
 use crate::sign::is_publisher;
 
@@ -33,8 +41,12 @@ pub use crate::feed::MAX_INDEX_BYTES;
 
 /// How long a presigned S3 GET is good for.
 const PRESIGN_FOR: Duration = Duration::from_secs(60);
-/// An OAuth token is fetched again when it has less than this left.
+/// An OAuth token is fetched again when it has less than this left, or
+/// less than half its lifetime if that is shorter.
 const TOKEN_MARGIN: Duration = Duration::from_secs(60);
+/// The longest a request for a small file (an index, a signature, a key
+/// set, a token) may take in all.
+const SMALL_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// A [`Source`] for `conn`, with secrets read through `env` (normally
 /// `|name| std::env::var(name).ok()`), and bundles capped at the default
@@ -66,7 +78,8 @@ pub fn source_with_limits(
                     resource,
                     scope,
                 } => HttpAuth::OAuth(OAuth {
-                    agent: agent(token_url)?,
+                    // No redirects: the form carries the client secret.
+                    agent: agent_with(token_url, 0)?,
                     token_url: token_url.clone(),
                     client_id: client_id.clone(),
                     client_secret: secret(env, client_secret_env)?,
@@ -129,9 +142,10 @@ pub fn source_with_limits(
     }
 }
 
-/// `prefix` ending in exactly one `/`; an empty prefix stays empty.
+/// `prefix` with no leading `/` and ending in exactly one `/`; an empty
+/// prefix stays empty.
 fn normalize_prefix(prefix: &str) -> String {
-    let trimmed = prefix.trim_end_matches('/');
+    let trimmed = prefix.trim_matches('/');
     if trimmed.is_empty() {
         String::new()
     } else {
@@ -148,23 +162,18 @@ fn secret(env: &dyn Fn(&str) -> Option<String>, name: &str) -> Result<Zeroizing<
     }
 }
 
-/// Whether `url`'s host is this machine.
-fn is_loopback(url: &url::Url) -> bool {
-    match url.host() {
-        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-        Some(url::Host::Domain(name)) => name == "localhost" || name.ends_with(".localhost"),
-        None => false,
-    }
-}
-
 /// An agent for requests to `url`'s host: through the environment's proxy
 /// unless the host is loopback, https only unless it is loopback (so no
 /// redirect can downgrade an https feed), never treating a status as an
 /// error, and with timeouts that stop a stalled server, not a slow download.
 fn agent(url: &str) -> Result<Agent, String> {
+    agent_with(url, 10)
+}
+
+/// [`agent`], following at most `max_redirects`.
+fn agent_with(url: &str, max_redirects: u32) -> Result<Agent, String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("not a URL: {e}"))?;
-    let loopback = is_loopback(&parsed);
+    let loopback = parsed.host_str().is_some_and(is_loopback);
     let proxy = if loopback {
         None
     } else {
@@ -176,6 +185,10 @@ fn agent(url: &str) -> Result<Agent, String> {
     Ok(Agent::config_builder()
         .proxy(proxy)
         .https_only(!loopback)
+        .max_redirects(max_redirects)
+        // Pinned rather than left to the default: a redirect never carries
+        // a bearer token, wherever it points.
+        .redirect_auth_headers(RedirectAuthHeaders::Never)
         .http_status_as_error(false)
         .tls_config(tls)
         .user_agent(concat!("legible-records/", env!("CARGO_PKG_VERSION")))
@@ -239,6 +252,9 @@ fn get(
     max: u64,
 ) -> Result<Reply, String> {
     let mut request = agent.get(url);
+    if max <= MAX_INDEX_BYTES {
+        request = request.config().timeout_global(Some(SMALL_TIMEOUT)).build();
+    }
     if let Some(token) = bearer {
         request = request.header(
             "Authorization",
@@ -339,31 +355,54 @@ struct OAuth {
     client_secret: Zeroizing<String>,
     resource: Option<String>,
     scope: Option<String>,
-    /// The token, and when it expires if the server said.
-    token: Option<(Zeroizing<String>, Option<Instant>)>,
+    /// The token held, if any.
+    token: Option<Token>,
+}
+
+/// An OAuth access token.
+struct Token {
+    value: Zeroizing<String>,
+    /// When it expires and how long it was good for, if the server said
+    /// and the instant can be represented; else it is held until a 401.
+    expires: Option<(Instant, Duration)>,
+}
+
+impl Token {
+    /// Whether it is good for this request: more than the margin left,
+    /// the margin being 60 s or half its lifetime, whichever is shorter,
+    /// so that a short-lived token isn't fetched again for every request.
+    fn fresh(&self, now: Instant) -> bool {
+        match self.expires {
+            None => true,
+            Some((at, lifetime)) => {
+                let margin = TOKEN_MARGIN.min(lifetime / 2);
+                now.checked_add(margin).is_some_and(|edge| edge < at)
+            }
+        }
+    }
 }
 
 impl OAuth {
     /// The token to send: the one held, unless it expires within the
     /// margin, else a new one.
     fn token(&mut self) -> Result<Zeroizing<String>, String> {
-        if let Some((token, expires)) = &self.token {
-            let fresh = expires.map_or(true, |at| Instant::now() + TOKEN_MARGIN < at);
-            if fresh {
-                return Ok(token.clone());
+        if let Some(token) = &self.token {
+            if token.fresh(Instant::now()) {
+                return Ok(token.value.clone());
             }
         }
         self.token = None;
-        let (token, expires) = self.fetch()?;
-        self.token = Some((token.clone(), expires));
-        Ok(token)
+        let token = self.fetch()?;
+        let value = token.value.clone();
+        self.token = Some(token);
+        Ok(value)
     }
 
     fn forget(&mut self) {
         self.token = None;
     }
 
-    fn fetch(&self) -> Result<(Zeroizing<String>, Option<Instant>), String> {
+    fn fetch(&self) -> Result<Token, String> {
         let asked = Instant::now();
         let mut form: Vec<(&str, &str)> = vec![
             ("grant_type", "client_credentials"),
@@ -380,6 +419,9 @@ impl OAuth {
         let mut response = self
             .agent
             .post(&self.token_url)
+            .config()
+            .timeout_global(Some(SMALL_TIMEOUT))
+            .build()
             .header("Accept", "application/json")
             .send_form(form)
             .map_err(|e| fail(describe(e)))?;
@@ -419,8 +461,15 @@ impl OAuth {
             serde_json::Value::String(s) => s.parse().ok(),
             _ => None,
         });
-        let expires = expires_in.map(|secs| asked + Duration::from_secs(secs));
-        Ok((Zeroizing::new(token.to_owned()), expires))
+        // A lifetime too long to represent counts as none given.
+        let expires = expires_in.and_then(|secs| {
+            let lifetime = Duration::from_secs(secs);
+            asked.checked_add(lifetime).map(|at| (at, lifetime))
+        });
+        Ok(Token {
+            value: Zeroizing::new(token.to_owned()),
+            expires,
+        })
     }
 }
 
@@ -463,6 +512,10 @@ impl Source for HttpsSource {
     }
 }
 
+/// S3's 403, which is also its answer for a missing object to a key that
+/// can't list the bucket.
+const S3_FORBIDDEN: &str = "HTTP 403 (not authorized; S3 also answers 403 for a missing object when the key can't list the bucket)";
+
 /// A feed under a prefix in an S3-compatible bucket.
 struct S3Source {
     agent: Agent,
@@ -482,7 +535,11 @@ impl Source for S3Source {
             .bucket
             .get_object(self.credentials.as_ref(), &key)
             .sign(PRESIGN_FOR);
-        fetched(get(&self.agent, url.as_str(), None, etag, max)?)
+        let reply = get(&self.agent, url.as_str(), None, etag, max)?;
+        if reply.status == 403 {
+            return Err(S3_FORBIDDEN.to_owned());
+        }
+        fetched(reply)
     }
 }
 
@@ -505,17 +562,16 @@ impl HttpsKeySource {
         }
     }
 
-    /// Reads every publisher's key set from `origin` (such as
-    /// `http://127.0.0.1:8080`, for tests) instead of the publisher's own
-    /// domain: `<origin>/.well-known/legible-records/keys.json`.
-    pub fn with_base(origin: &str) -> HttpsKeySource {
+    /// For tests: reads every publisher's key set from `origin` (such as
+    /// `http://127.0.0.1:8080`) instead of the publisher's own domain:
+    /// `<origin>/.well-known/legible-records/keys.json`.
+    #[doc(hidden)]
+    pub fn with_base(origin: &str) -> Result<HttpsKeySource, String> {
         let origin = origin.trim_end_matches('/').to_owned();
-        HttpsKeySource {
-            agent: agent(&origin)
-                .or_else(|_| agent("https://example.com/"))
-                .expect("a fixed URL parses"),
+        Ok(HttpsKeySource {
+            agent: agent(&origin).map_err(|e| format!("key source origin: {e}"))?,
             origin: Some(origin),
-        }
+        })
     }
 
     fn file(&self, base: &str, name: &str) -> Result<Option<Vec<u8>>, String> {

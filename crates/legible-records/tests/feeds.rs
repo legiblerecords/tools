@@ -1049,6 +1049,8 @@ fn connection_urls_are_https_with_a_slash() {
         ("http://127.0.0.2/track/", "https"),
         ("https://feeds.acme.example/track", "slash"),
         ("https://feeds.acme.example/track/?x=1", "slash"),
+        ("https://feeds.acme.example//track/", "//"),
+        ("https://feeds.acme.example/track//", "//"),
     ];
     for (url, needle) in refused {
         let err = parse_connection(&connection_json(

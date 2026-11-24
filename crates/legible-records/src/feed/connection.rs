@@ -114,8 +114,10 @@ fn env(object: &Map<String, Value>, place: &str, name: &str, why: &str) -> Resul
     Ok(value)
 }
 
-/// Whether `host` (as written in a URL, without its port) is this machine.
-fn is_loopback(host: &str) -> bool {
+/// Whether `host` (as written in a URL, without its port) is this machine:
+/// the one test for loopback, used here for plain `http` and by `net` to
+/// skip the proxy.
+pub(crate) fn is_loopback(host: &str) -> bool {
     matches!(host, "127.0.0.1" | "[::1]" | "localhost")
 }
 
@@ -181,6 +183,14 @@ fn location(value: Option<&Value>) -> Result<Location, String> {
                     "location.url must be the feed's base URL, ending in a slash, with no query or fragment"
                         .to_owned(),
                 );
+            }
+            // An empty path segment would make a file's URL differ from the
+            // one the publisher means, and servers treat it differently.
+            let path = url
+                .split_once("://")
+                .map_or("", |(_, rest)| rest.find('/').map_or("", |i| &rest[i..]));
+            if path.contains("//") {
+                return Err("location.url has an empty path segment (//)".to_owned());
             }
             Ok(Location::Https { url })
         }

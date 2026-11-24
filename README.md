@@ -76,6 +76,10 @@ age -d -i ~/.ssh/id_ed25519 evidence.zip.age > evidence.zip && legible bundle un
 
 All of them implement the [spec](https://github.com/legiblerecords/spec), and are tested against its vectors: `crates/legible-records/tests/vectors/` holds a copy, and `SOURCE` says which spec commit it came from.
 
+### Feeds in S3
+
+A feed in an S3-compatible bucket is read with presigned GETs. The reader's access key needs `s3:ListBucket` on the feed's prefix as well as `s3:GetObject`: a reader asks for files that may not exist (`feed.json.age` beside `feed.json`, and `feed.sig`), and S3 answers `404` for a missing object only to a key that may list the bucket. To any other key it answers `403`, which the reader reports as an error.
+
 ## Contributing and security
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
