@@ -30,6 +30,9 @@ pub struct Delivered {
     /// The stream's entry in the index.
     pub stream: StreamEntry,
     pub bundle: Opened,
+    /// The bundle's zip exactly as stored, after decryption if the feed is
+    /// encrypted: what a reader that keeps the file writes.
+    pub zip: Vec<u8>,
     pub signature: SignatureStatus,
     /// The bundle's `published_at`: its manifest's, or for an unsigned
     /// bundle without one, the index entry's.
@@ -300,10 +303,11 @@ pub fn pull(
         let held = state.as_deref().and_then(|s| s.streams.get(&entry.id));
         let outcome = match check_stream(source, entry, held, &index, &trust, pinned, options) {
             Err(outcome) => outcome,
-            Ok((bundle, signature, published_at)) => {
+            Ok((bundle, zip, signature, published_at)) => {
                 let delivered = Delivered {
                     stream: entry.clone(),
                     bundle,
+                    zip,
                     signature,
                     published_at: published_at.clone(),
                     feed_updated_at: index.updated_at.clone(),
@@ -435,6 +439,9 @@ fn refresh_key_set(
     (Some(set), true)
 }
 
+/// A stream's checked bundle: opened, as stored, its signature status and `published_at`.
+type Checked = (Opened, Vec<u8>, SignatureStatus, String);
+
 /// Steps 6 and 8–10 for one stream: the bundle, its signature and its
 /// manifest's publication fields, or the outcome that stops it.
 fn check_stream(
@@ -445,7 +452,7 @@ fn check_stream(
     trust: &Trust,
     pinned: bool,
     options: &PullOptions,
-) -> Result<(Opened, SignatureStatus, String), StreamOutcome> {
+) -> Result<Checked, StreamOutcome> {
     // 6. Unchanged.
     if held.is_some_and(|h| h.sha256 == entry.sha256) {
         return Err(StreamOutcome::Unchanged);
@@ -522,5 +529,5 @@ fn check_stream(
             .unwrap_or(&entry.published_at)
             .to_owned(),
     };
-    Ok((bundle, signature, published_at))
+    Ok((bundle, bytes, signature, published_at))
 }

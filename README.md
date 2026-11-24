@@ -33,7 +33,7 @@ cargo install --git https://github.com/legiblerecords/tools legible
 | `legible bundle sign <bundle.zip> -k <key.json> -o <signed.zip>` | Signs a bundle's manifest as stored |
 | `legible feed publish <dir> --feed <id> --stream <id> …` | Packs records into a stream of a feed in a directory: the bundle, then `feed.json` (or `.age`) and `feed.sig` |
 | `legible feed check <connection.json>` | Polls a feed and reports each stream's outcome; keeps and delivers nothing |
-| `legible feed pull <connection.json> --state <dir> --out <dir>` | Polls a feed, writes each accepted bundle to `<out>/<stream>/<published_at>.zip`, and keeps the reader state |
+| `legible feed pull <connection.json> --state <dir> --out <dir>` | Polls a feed, writes each accepted bundle to `<out>/<stream>/<published_at>-<hash>.zip`, and keeps the reader state |
 
 For a published type, give the base of its `$id` with `--base`, such as `--base https://monorail.tech/schemas/`. Shared names such as `date` then point at `org.legiblerecords.common`.
 
@@ -115,7 +115,7 @@ ACME_FEED_TOKEN=... legible feed pull connection.json --state ~/.legible/state -
 
 Both print one line per stream: `<id>: accepted (verified <publisher> <key>)`, `accepted (unverified)`, `unchanged`, `withdrawn`, the outcome code of a refusal (such as `replay` or `bad_signature`), or `failed: <message>`. A refused index prints `index: <code>`. A publisher's key set can add a key nobody endorsed; the key is not trusted until you approve it, and the pull prints it as `pending key: --approve <publisher>/<id>=<public_key>`. Give that argument (repeatable) to the next `feed pull`, which keeps it in the state.
 
-`feed check` is stateless: nothing is written, and the history checks (`replay`, `stale_feed`) need a state, so use it to see whether a feed and its signatures are good. `feed pull` keeps `<state>/<feed id with / as __>.json`, written by temporary file and rename and only when something changed; a refused or unreadable index leaves it untouched. The state holds what the spec's reader state does, and the index's ETag, so an unchanged feed costs one request. Bundles are written decrypted, as `<out>/<stream>/<published_at with : as ->.zip`, and a file already there is never overwritten.
+`feed check` is stateless: nothing is written, and the history checks (`replay`, `stale_feed`) need a state, so use it to see whether a feed and its signatures are good. `feed pull` keeps `<state>/<feed id with / as __>.json`, written by temporary file and rename and only when something changed; a refused or unreadable index leaves it untouched. The state holds what the spec's reader state does, and the index's ETag, so an unchanged feed costs one request. Bundles are written decrypted, exactly as stored, as `<out>/<stream>/<published_at with : as ->-<first 12 hex of the bundle's SHA-256>.zip` (so two different bundles never share a name), and a different file already there is never overwritten.
 
 Exit status is 0 when everything is accepted, unchanged or withdrawn; 1 when any stream was refused or failed, the index was refused, or a key is pending approval; and 2 when the feed or its keys couldn't be reached and nothing could be checked, or the arguments or connection file are wrong.
 

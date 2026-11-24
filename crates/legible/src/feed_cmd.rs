@@ -39,7 +39,7 @@ pub enum FeedCommand {
     /// anything is refused or a key waits for approval, 2 when the feed couldn't be reached.
     Check(ReadArgs),
     /// Poll a feed from a connection file, write each accepted bundle (decrypted) to
-    /// <out>/<stream>/<published_at>.zip, and keep what the reader remembers in --state.
+    /// <out>/<stream>/<published_at>-<hash>.zip, and keep what the reader remembers in --state.
     Pull(PullArgs),
 }
 
@@ -47,7 +47,8 @@ pub enum FeedCommand {
 pub struct ReadArgs {
     /// The connection file.
     connection: PathBuf,
-    /// Read publishers' key sets from this origin instead of their own domains (for tests).
+    /// For tests: read publishers' key sets from this loopback origin (127.0.0.1, [::1] or
+    /// localhost) instead of from their own domains. Any other host is refused.
     #[arg(long, hide = true, value_name = "ORIGIN")]
     key_origin: Option<String>,
 }
@@ -59,7 +60,7 @@ pub struct PullArgs {
     /// The directory for the reader's state: <feed id with / as __>.json in it.
     #[arg(long)]
     state: PathBuf,
-    /// The directory accepted bundles are written to, as <stream>/<published_at>.zip.
+    /// The directory accepted bundles are written to, as <stream>/<published_at>-<hash>.zip.
     #[arg(long)]
     out: PathBuf,
     /// Approve a key a key set adds without an endorsement, as the pull printed it:
@@ -771,9 +772,14 @@ fn pull_feed(args: PullArgs) -> Result<(), Stop> {
         Some(&mut state),
         etag.clone(),
         &mut |d| {
-            let zip = bundle::to_zip(&d.bundle).map_err(|p| p.join("; "))?;
-            let name = format!("{}.zip", d.published_at.replace(':', "-"));
-            write_new(&out.join(&d.stream.id).join(name), &zip)?;
+            // The hash keeps two different bundles with one published_at (an
+            // unsigned bundle's date is its own to claim) from sharing a file.
+            let name = format!(
+                "{}-{}.zip",
+                d.published_at.replace(':', "-"),
+                &bundle::sha256_hex(&d.zip)[..12]
+            );
+            write_new(&out.join(&d.stream.id).join(name), &d.zip)?;
             signatures.insert(d.stream.id.clone(), d.signature);
             Ok(())
         },

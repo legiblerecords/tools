@@ -1182,6 +1182,7 @@ mod feed_read {
             "location": {"kind": "https", "url": format!("http://127.0.0.1:{port}/track/")},
             "auth": {"method": "bearer", "token_env": "TRACK_FEED_TOKEN"},
             "keys": keys,
+            "age_identity_env": "TRACK_AGE_IDENTITY",
         });
         let path = s.temp.path("connection.json");
         std::fs::write(&path, serde_json::to_vec(&connection).unwrap()).unwrap();
@@ -1194,6 +1195,7 @@ mod feed_read {
         let mut command = Command::new(env!("CARGO_BIN_EXE_legible"));
         command.arg("feed").arg(sub).args(args);
         command.env("TRACK_FEED_TOKEN", TOKEN);
+        command.env("TRACK_AGE_IDENTITY", identity_text());
         if let Some(port) = origin {
             command
                 .arg("--key-origin")
@@ -1210,6 +1212,20 @@ mod feed_read {
     ) -> Vec<&'a Path> {
         let _ = s;
         vec![connection, arg("--state"), state, arg("--out"), out]
+    }
+
+    /// A test-only age identity, made once per run.
+    fn identity_text() -> String {
+        use age::secrecy::ExposeSecret;
+        static IDENTITY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        IDENTITY
+            .get_or_init(|| {
+                age::x25519::Identity::generate()
+                    .to_string()
+                    .expose_secret()
+                    .to_owned()
+            })
+            .clone()
     }
 
     fn text(bytes: &[u8]) -> String {
@@ -1314,19 +1330,25 @@ mod feed_read {
             "{said}"
         );
 
-        // One zip per stream, named by published_at with ':' as '-'.
+        // One zip per stream, named by published_at with ':' as '-', and the
+        // first 12 hex of the file's own SHA-256.
         let held = s.state();
         let files = out_files(&out);
         assert_eq!(files.len(), 2, "{files:?}");
         for id in ["alpha", "beta"] {
-            let published = &held.streams[id].published_at;
-            let name = format!("{id}/{}.zip", published.replace(':', "-"));
-            assert!(files.contains(&name), "{name} in {files:?}");
-            // Decrypted and whole: the CLI verifies it, signature included.
+            let published = held.streams[id].published_at.replace(':', "-");
+            let name = files
+                .iter()
+                .find(|f| f.starts_with(&format!("{id}/{published}-")))
+                .unwrap_or_else(|| panic!("{id}/{published}-<hash>.zip in {files:?}"));
+            let path = out.join(name);
+            let hash = legible_records::bundle::sha256_hex(&std::fs::read(&path).unwrap());
+            assert_eq!(*name, format!("{id}/{published}-{}.zip", &hash[..12]));
+            // Whole: the CLI verifies it, signature included.
             let verified = legible(&[
                 arg("bundle"),
                 arg("verify"),
-                &out.join(&name),
+                &path,
                 arg("--pin"),
                 arg(&format!("acme.example/2026-11={}", public_key(&s))),
             ]);
@@ -1537,5 +1559,144 @@ mod feed_read {
                 assert!(name.ends_with(".zip") && !name.contains(".tmp"), "{name}");
             }
         }
+    }
+
+    #[test]
+    fn a_failed_write_is_retried_next_pull() {
+        let s = setup("t9-retry", &["alpha"]);
+        let server = serve(s.feed_dir.clone(), s.keys_dir.clone(), true);
+        let connection = write_connection(&s, server.port, true);
+        let (state, out) = (s.temp.path("state"), s.temp.path("out"));
+        let args = pull_args(&s, &connection, &state, &out);
+        // <out>/alpha is a file, so alpha's bundle can't be written.
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("alpha"), b"in the way").unwrap();
+        let result = run("pull", &args, Some(server.port));
+        assert_eq!(result.status.code(), Some(1), "{result:?}");
+        assert!(
+            text(&result.stdout).contains("alpha: failed: "),
+            "{result:?}"
+        );
+        assert!(s.state().streams.is_empty());
+        let kept: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(s.state_file()).unwrap()).unwrap();
+        assert!(kept.get("etag").is_none(), "no ETag saved: {kept}");
+
+        std::fs::remove_file(out.join("alpha")).unwrap();
+        let again = run("pull", &args, Some(server.port));
+        assert_eq!(again.status.code(), Some(0), "{again:?}");
+        assert!(
+            text(&again.stdout).contains("alpha: accepted (verified acme.example 2026-11)"),
+            "{again:?}"
+        );
+        assert_eq!(out_files(&out).len(), 1);
+        assert!(s.state().streams.contains_key("alpha"));
+    }
+
+    #[test]
+    fn different_bundles_with_one_published_at_get_different_files() {
+        use legible_records::bundle::{pack_with, sha256_hex, Input, PackOptions};
+        use legible_records::feed::{render_feed, Feed, StreamEntry};
+        let s = setup("t9-collide", &[]);
+        std::fs::create_dir_all(s.feed_dir.join("bundles")).unwrap();
+        // Unsigned bundles, so nothing checks one's published_at against the last.
+        let publish_unsigned = |id: &str, updated_at: &str| {
+            let input = Input {
+                name: "ack.json".to_owned(),
+                bytes: format!(
+                    r#"{{"$type":"tech.monorail.policy.acknowledgment","version":1,"id":"{id}","title":"{id}"}}"#
+                )
+                .into_bytes(),
+            };
+            let options = PackOptions {
+                published_at: Some("2026-11-24T10:00:00Z".to_owned()),
+                ..PackOptions::default()
+            };
+            let zip = pack_with(&[input], &[], &options).unwrap().zip;
+            let sha256 = sha256_hex(&zip);
+            let bundle = format!("bundles/{sha256}.zip");
+            std::fs::write(s.feed_dir.join(&bundle), &zip).unwrap();
+            let feed = Feed {
+                id: FEED.to_owned(),
+                publisher: "acme.example".to_owned(),
+                audience: "Monorail, for Track".to_owned(),
+                updated_at: updated_at.to_owned(),
+                streams: vec![StreamEntry {
+                    id: "alpha".to_owned(),
+                    title: "Acknowledgments".to_owned(),
+                    record_types: vec![],
+                    bundle,
+                    sha256,
+                    published_at: "2026-11-24T10:00:00Z".to_owned(),
+                }],
+            };
+            std::fs::write(s.feed_dir.join("feed.json"), render_feed(&feed)).unwrap();
+        };
+        std::fs::remove_file(s.keys_dir.join("keys.json")).unwrap();
+        let server = serve(s.feed_dir.clone(), s.keys_dir.clone(), false);
+        let connection = write_connection(&s, server.port, false);
+        let (state, out) = (s.temp.path("state"), s.temp.path("out"));
+        let args = pull_args(&s, &connection, &state, &out);
+
+        publish_unsigned("one", "2026-11-24T10:00:01Z");
+        let first = run("pull", &args, Some(server.port));
+        assert_eq!(first.status.code(), Some(0), "{first:?}");
+        publish_unsigned("two", "2026-11-24T10:00:02Z");
+        let second = run("pull", &args, Some(server.port));
+        assert_eq!(second.status.code(), Some(0), "{second:?}");
+        assert!(
+            text(&second.stdout).contains("alpha: accepted (unverified)"),
+            "{second:?}"
+        );
+        let files = out_files(&out);
+        assert_eq!(files.len(), 2, "{files:?}");
+        assert!(
+            files
+                .iter()
+                .all(|f| f.starts_with("alpha/2026-11-24T10-00-00Z-")),
+            "{files:?}"
+        );
+    }
+
+    #[test]
+    fn secrets_never_reach_the_output() {
+        let s = setup("t9-secrets", &["alpha"]);
+        let server = serve(s.feed_dir.clone(), s.keys_dir.clone(), false);
+        let connection = write_connection(&s, server.port, true);
+        let (state, out) = (s.temp.path("state"), s.temp.path("out"));
+        let down = {
+            let gone = tiny_http::Server::http("127.0.0.1:0").unwrap();
+            gone.server_addr().to_ip().unwrap().port()
+        };
+        let unreachable = write_connection(&s, down, true);
+        let pull = pull_args(&s, &connection, &state, &out);
+        let pull_down = pull_args(&s, &unreachable, &state, &out);
+        let runs = [
+            run("check", &[&connection], Some(server.port)),
+            run("pull", &pull, Some(server.port)),
+            run("pull", &pull, Some(server.port)),
+            run("check", &[&unreachable], Some(down)),
+            run("pull", &pull_down, Some(down)),
+        ];
+        let identity = identity_text();
+        for result in &runs {
+            let all = format!("{}{}", text(&result.stdout), text(&result.stderr));
+            assert!(!all.contains(TOKEN), "{all}");
+            assert!(!all.contains(&identity), "{all}");
+        }
+        assert_eq!(runs[3].status.code(), Some(2));
+    }
+
+    #[test]
+    fn key_origin_must_be_loopback() {
+        let s = setup("t9-origin", &["alpha"]);
+        let connection = write_connection(&s, 1, true);
+        let mut command = Command::new(env!("CARGO_BIN_EXE_legible"));
+        command.args(["feed", "check"]).arg(&connection);
+        command.args(["--key-origin", "https://keys.example.net"]);
+        command.env("TRACK_FEED_TOKEN", TOKEN);
+        let result = command.output().unwrap();
+        assert_eq!(result.status.code(), Some(2), "{result:?}");
+        assert!(text(&result.stderr).contains("loopback"), "{result:?}");
     }
 }

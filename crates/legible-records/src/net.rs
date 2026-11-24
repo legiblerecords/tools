@@ -562,11 +562,19 @@ impl HttpsKeySource {
         }
     }
 
-    /// For tests: reads every publisher's key set from `origin` (such as
-    /// `http://127.0.0.1:8080`) instead of the publisher's own domain:
+    /// For tests: reads every publisher's key set from `origin`, which must be
+    /// a loopback host (such as `http://127.0.0.1:8080`) instead of the publisher's own domain:
     /// `<origin>/.well-known/legible-records/keys.json`.
     #[doc(hidden)]
     pub fn with_base(origin: &str) -> Result<HttpsKeySource, String> {
+        let parsed =
+            url::Url::parse(origin).map_err(|e| format!("key source origin: not a URL: {e}"))?;
+        if !parsed.host_str().is_some_and(is_loopback) {
+            return Err(
+                "key source origin: only a loopback host (127.0.0.1, [::1], localhost) may stand in for a publisher's domain"
+                    .to_owned(),
+            );
+        }
         let origin = origin.trim_end_matches('/').to_owned();
         Ok(HttpsKeySource {
             agent: agent(&origin).map_err(|e| format!("key source origin: {e}"))?,
