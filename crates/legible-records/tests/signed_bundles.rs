@@ -3,12 +3,13 @@
 use std::io::{Cursor, Read};
 
 use legible_records::bundle::{
-    add_signature, check_signature, open, pack, pack_with, verify, Input, Limits, PackOptions,
-    SignatureStatus, SIGNATURE,
+    add_signature, check_signature, open, pack, pack_with, verify, verify_at, Input, Limits,
+    PackOptions, SignatureStatus, SIGNATURE,
 };
 use legible_records::code::Code;
-use legible_records::keys::{KeySet, Pin, Trust};
-use legible_records::sign::{from_b64url, SigningKey};
+use legible_records::keys::{parse_pin, KeySet, Pin, Trust};
+use legible_records::sign::SigningKey;
+use legible_records::time;
 use serde_json::{json, Value};
 
 /// A test-only seed. Never use it for anything real.
@@ -17,14 +18,16 @@ const TEST_SEED: [u8; 32] = [7; 32];
 fn trust_from(value: &Value) -> Trust {
     let mut trust = Trust::default();
     for p in value["pins"].as_array().expect("pins") {
-        trust.pins.push(Pin {
-            publisher: p["publisher"].as_str().unwrap().to_owned(),
-            id: p["id"].as_str().unwrap().to_owned(),
-            public_key: from_b64url(p["public_key"].as_str().unwrap())
-                .unwrap()
-                .try_into()
-                .unwrap(),
-        });
+        let field = |name: &str| p[name].as_str().unwrap();
+        trust.pins.push(
+            parse_pin(
+                field("publisher"),
+                field("id"),
+                field("alg"),
+                field("public_key"),
+            )
+            .unwrap(),
+        );
     }
     for set in value["key_sets"].as_array().expect("key_sets") {
         let parsed = KeySet::parse(&serde_json::to_vec(set).unwrap()).expect("key set parses");
@@ -35,13 +38,7 @@ fn trust_from(value: &Value) -> Trust {
 
 /// Vectors this reader doesn't pass yet; each must still fail, so the list
 /// only shrinks.
-const PENDING: &[&str] = &[
-    "failures",
-    "key-unknown-alg",
-    "pin-conflicts-with-key-set",
-    "published-at-future",
-    "published-at-future-of-now",
-];
+const PENDING: &[&str] = &[];
 
 #[test]
 fn signed_bundle_vectors() {
@@ -55,13 +52,14 @@ fn signed_bundle_vectors() {
         let zip = std::fs::read(path.join("bundle.zip")).unwrap();
         let trust = trust_from(&case["trust"]);
         let expected = case["expected_publisher"].as_str();
+        let now = time::parse(case["now"].as_str().unwrap_or("2026-12-01T00:00:00Z")).unwrap();
         // The zip's entry names are read first; the signature is checked
         // before the bundle's own checks.
         let got = match open(&zip, Limits::default()) {
             Err(_) => json!({"error": Code::BadBundle.as_str()}),
             Ok(opened) => match check_signature(&opened, &trust, expected) {
                 Err(code) => json!({"error": code.as_str()}),
-                Ok(_) if !verify(&opened, &[]).problems.is_empty() => {
+                Ok(_) if !verify_at(&opened, &[], now).problems.is_empty() => {
                     json!({"error": Code::BadBundle.as_str()})
                 }
                 Ok(SignatureStatus::Verified { publisher, key }) => {
@@ -92,6 +90,7 @@ fn trusting(key: &SigningKey) -> Trust {
         pins: vec![Pin {
             publisher: public.publisher,
             id: public.id,
+            alg: "ed25519".to_owned(),
             public_key: public.key,
         }],
         ..Trust::default()

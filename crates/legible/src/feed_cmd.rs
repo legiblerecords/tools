@@ -14,12 +14,14 @@ use std::time::Duration;
 use clap::{Args, Subcommand};
 use legible_records::bundle::{self, Input, PackOptions};
 use legible_records::bundle::{Limits, SignatureStatus};
+use legible_records::code::Code;
 use legible_records::feed::index::{is_feed_id, is_sha256, is_slug};
 use legible_records::feed::{
     check_bundle_paths, collectable, next_published_at, parse_connection, parse_feed, pull,
-    render_feed, Connection, Feed, IndexOutcome, KeySource, PublishState, PullOptions, PullReport,
-    ReaderState, StreamEntry, StreamOutcome, MAX_INDEX_BYTES,
+    render_feed, Connection, Feed, IndexOutcome, KeySetOutcome, KeySource, PublishState,
+    PullOptions, PullReport, ReaderState, StreamEntry, StreamOutcome, MAX_INDEX_BYTES,
 };
+use legible_records::keys::parse_pin_text;
 use legible_records::net::{source_with_limits, HttpsKeySource};
 use legible_records::sign::{self, is_publisher, Context, SigningKey};
 use legible_records::time::{self, Instant};
@@ -578,6 +580,7 @@ fn poll(
         identity: identity.as_ref().map(|i| i.as_str()),
         etag,
         limits,
+        now: Some(time::now()),
     };
     Ok(pull(
         source.as_mut(),
@@ -590,19 +593,50 @@ fn poll(
 }
 
 /// Prints what a poll found, and says whether it found anything to act on
-/// (exit 1). A feed that couldn't be read at all is exit 2.
+/// (exit 1): a refused or pending key set (`keys: <code>`), a refused index,
+/// or a stream refused or failed. A key set that couldn't be fetched is
+/// printed on stderr and is no problem on its own, since the poll went on
+/// with the keys the reader already trusts. A feed that couldn't be read at
+/// all is exit 2.
 fn report_poll(
     report: &PullReport,
     signatures: &std::collections::BTreeMap<String, SignatureStatus>,
 ) -> Result<(), Stop> {
-    for error in &report.fetch_errors {
-        eprintln!("{error}");
-    }
     let mut problems = false;
+    match &report.key_set {
+        KeySetOutcome::NotServed | KeySetOutcome::Accepted => {}
+        KeySetOutcome::Failed(e) => eprintln!("keys: failed: {e}"),
+        KeySetOutcome::Refused(code) => {
+            println!("keys: {}", code.as_str());
+            problems = true;
+        }
+        KeySetOutcome::Pending(keys) => {
+            println!("keys: {}", Code::NeedsApproval.as_str());
+            for pin in keys {
+                if pin.alg == "ed25519" {
+                    println!(
+                        "pending key: --approve {}/{}={}",
+                        pin.publisher,
+                        pin.id,
+                        legible_records::sign::b64url(&pin.public_key)
+                    );
+                } else {
+                    println!(
+                        "pending key: {}/{} has alg {:?}, which this reader can't use",
+                        pin.publisher, pin.id, pin.alg
+                    );
+                }
+            }
+            problems = true;
+        }
+    }
     match &report.index {
-        IndexOutcome::Failed(e) => return fail(format!("index: failed: {e}")),
+        IndexOutcome::Failed(_) => {}
         IndexOutcome::Refused(code) => {
             println!("index: {}", code.as_str());
+            if let Some(detail) = &report.index_detail {
+                eprintln!("index: {detail}");
+            }
             problems = true;
         }
         IndexOutcome::NotModified => println!("index: not modified"),
@@ -628,14 +662,8 @@ fn report_poll(
             }
         }
     }
-    for pin in &report.pending_keys {
-        println!(
-            "pending key: --approve {}/{}={}",
-            pin.publisher,
-            pin.id,
-            legible_records::sign::b64url(&pin.public_key)
-        );
-        problems = true;
+    if let IndexOutcome::Failed(e) = &report.index {
+        return fail(format!("index: failed: {e}"));
     }
     if problems {
         Err(Stop::Problems)
@@ -741,7 +769,7 @@ fn pull_feed(args: PullArgs) -> Result<(), Stop> {
         .approve
         .iter()
         .map(|text| {
-            crate::parse_pin(text).map_err(|e| Stop::Failed(format!("--approve {text}: {e}")))
+            parse_pin_text(text).map_err(|e| Stop::Failed(format!("--approve {text}: {e}")))
         })
         .collect::<Result<Vec<_>, _>>()?;
     let conn = read_connection(&args.connection)?;
@@ -785,25 +813,24 @@ fn pull_feed(args: PullArgs) -> Result<(), Stop> {
         },
     )?;
 
-    // A refused or failed index changed nothing; the state stays as it was.
+    // A refused or failed index changes nothing else, but the key steps run
+    // on every poll: a key set accepted, or streams a revoked key signed
+    // forgotten, are kept whatever became of the index.
     let kept_etag = match &report.index {
         IndexOutcome::Accepted => report
             .etag
             .clone()
-            .filter(|_| report.pending_keys.is_empty()),
-        IndexOutcome::NotModified => etag,
+            .filter(|_| !matches!(report.key_set, KeySetOutcome::Pending(_))),
+        IndexOutcome::NotModified => report.etag.clone(),
         IndexOutcome::Refused(_) | IndexOutcome::Failed(_) => None,
     };
-    if matches!(
-        report.index,
-        IndexOutcome::Accepted | IndexOutcome::NotModified
-    ) {
-        let bytes = render_state(&state, kept_etag.as_deref());
-        if held_bytes.as_deref() != Some(bytes.as_slice()) {
-            std::fs::create_dir_all(&args.state)
-                .map_err(|e| Stop::Failed(format!("{}: {e}", args.state.display())))?;
-            write_atomic(&state_path, &bytes)?;
-        }
+    let bytes = render_state(&state, kept_etag.as_deref());
+    if held_bytes.as_deref() != Some(bytes.as_slice())
+        && (held_bytes.is_some() || state != ReaderState::default())
+    {
+        std::fs::create_dir_all(&args.state)
+            .map_err(|e| Stop::Failed(format!("{}: {e}", args.state.display())))?;
+        write_atomic(&state_path, &bytes)?;
     }
     report_poll(&report, &signatures)
 }

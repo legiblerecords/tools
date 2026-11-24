@@ -6,11 +6,12 @@ use legible_records::bundle::{pack_with, sha256_hex, Input, PackOptions, Signatu
 use legible_records::code::Code;
 use legible_records::feed::{
     parse_connection, parse_feed, pull, Auth, Connection, Delivered, DirSource, Fetched,
-    IndexOutcome, KeySetFiles, KeySource, Location, NoKeySource, PullOptions, PullReport,
-    ReaderState, Source, StreamOutcome, StreamState,
+    IndexOutcome, KeySetFiles, KeySetOutcome, KeySource, Location, NoKeySource, PullOptions,
+    PullReport, ReaderState, Signer, Source, StreamOutcome, StreamState,
 };
 use legible_records::keys::{KeySet, Pin};
 use legible_records::sign::{b64url, sign, Context, SigningKey};
+use legible_records::time;
 use serde_json::{json, Value};
 
 fn vectors_dir() -> String {
@@ -75,38 +76,19 @@ impl KeySource for VectorKeys {
 }
 
 /// The key set outcome a poll reports, as the vectors write it.
-fn key_set_str(report: &PullReport) -> String {
-    if !report.pending_keys.is_empty() {
-        return "needs_approval".to_owned();
-    }
-    for error in &report.fetch_errors {
-        for code in Code::ALL {
-            if error.contains(code.as_str()) {
-                return code.as_str().to_owned();
-            }
-        }
-    }
-    match report.fetch_errors.first() {
-        Some(error) => format!("failed: {error}"),
-        None => "accepted".to_owned(),
+fn key_set_str(outcome: &KeySetOutcome) -> String {
+    match outcome {
+        KeySetOutcome::Accepted => "accepted".to_owned(),
+        KeySetOutcome::Pending(_) => "needs_approval".to_owned(),
+        KeySetOutcome::Refused(code) => code.as_str().to_owned(),
+        KeySetOutcome::NotServed => "not served".to_owned(),
+        KeySetOutcome::Failed(e) => format!("failed: {e}"),
     }
 }
 
 /// Vectors this reader doesn't pass yet; each must still fail, so the list
 /// only shrinks.
-const PENDING: &[&str] = &[
-    "bundle-future-published-at",
-    "failures",
-    "index-future-updated-at",
-    "key-set-future-updated-at",
-    "key-set-other-publisher",
-    "pending-set-revokes-pin",
-    "published-at-mismatch",
-    "revoked-key-clears-stream",
-    "revoked-key-clears-watermark",
-    "revoked-key-index-refused",
-    "unsigned-bundle-missing-published-at",
-];
+const PENDING: &[&str] = &[];
 
 #[test]
 fn feed_vectors() {
@@ -119,13 +101,18 @@ fn feed_vectors() {
             root: path.join("feed"),
         };
         let served = path.join("key-set");
+        let now = case["now"].as_str().unwrap_or("2026-12-01T00:00:00Z");
+        let options = PullOptions {
+            now: Some(time::parse(now).unwrap()),
+            ..PullOptions::default()
+        };
         let report = pull(
             &mut source,
             &mut VectorKeys(served.clone()),
             &conn,
             state.as_mut(),
             &mut |_| Ok(()),
-            &PullOptions::default(),
+            &options,
         );
         let streams: BTreeMap<String, Value> = report
             .streams
@@ -134,7 +121,7 @@ fn feed_vectors() {
             .collect();
         let mut got = json!({"index": index_str(&report.index), "streams": streams});
         if served.is_dir() {
-            got["key_set"] = json!(key_set_str(&report));
+            got["key_set"] = json!(key_set_str(&report.key_set));
         }
         let expect = &case["expect"];
         match (&got == expect, PENDING.contains(&name.as_str())) {
@@ -287,11 +274,22 @@ fn accepted_delivery_updates_state() {
         StreamState {
             sha256: entry.sha256.clone(),
             published_at: entry.published_at.clone(),
+            signer: Some(Signer {
+                publisher: "acme.example".to_owned(),
+                key: "2026-11".to_owned(),
+            }),
         }
     );
     assert_eq!(
         state.feed_updated_at.as_deref(),
         Some(index.updated_at.as_str())
+    );
+    assert_eq!(
+        state.feed_signer,
+        Some(Signer {
+            publisher: "acme.example".to_owned(),
+            key: "2026-11".to_owned(),
+        })
     );
 }
 
@@ -477,6 +475,7 @@ fn pin(key: &SigningKey) -> Pin {
     Pin {
         publisher: public.publisher,
         id: public.id,
+        alg: "ed25519".to_owned(),
         public_key: public.key,
     }
 }
@@ -603,14 +602,15 @@ fn run(
     conn: &Connection,
     state: Option<&mut ReaderState>,
 ) -> PullReport {
-    pull(
-        source,
-        keys,
-        conn,
-        state,
-        &mut |_| Ok(()),
-        &PullOptions::default(),
-    )
+    pull(source, keys, conn, state, &mut |_| Ok(()), &options())
+}
+
+/// The reader's clock in these tests, as in the vectors.
+fn options() -> PullOptions<'static> {
+    PullOptions {
+        now: Some(time::parse("2026-12-01T00:00:00Z").unwrap()),
+        ..PullOptions::default()
+    }
 }
 
 #[test]
@@ -632,8 +632,7 @@ fn stateless_accepts_rotation_endorsed_by_pinned_key() {
     assert_eq!(keys.1, ["acme.example"]);
     assert_eq!(report.index, IndexOutcome::Accepted);
     assert_eq!(report.streams["notes"], StreamOutcome::Accepted);
-    assert!(report.pending_keys.is_empty());
-    assert!(report.fetch_errors.is_empty(), "{:?}", report.fetch_errors);
+    assert_eq!(report.key_set, KeySetOutcome::Accepted);
 }
 
 #[test]
@@ -657,7 +656,7 @@ fn unendorsed_rotation_needs_approval_and_keeps_held_set() {
     let set = key_set_bytes("2026-11-24T00:00:00Z", &[&a, &b]);
     let mut keys = FixedKeys(Ok(Some((set, None))), Vec::new());
     let report = run(&mut source, &mut keys, &conn_with(vec![]), Some(&mut state));
-    assert_eq!(report.pending_keys, vec![pin(&b)]);
+    assert_eq!(report.key_set, KeySetOutcome::Pending(vec![pin(&b)]));
     // The index is signed by the key waiting for approval.
     assert_eq!(report.index, IndexOutcome::Refused(Code::UnknownKey));
     assert_eq!(state, before);
@@ -666,7 +665,7 @@ fn unendorsed_rotation_needs_approval_and_keeps_held_set() {
     state.approved.push(pin(&b));
     let report = run(&mut source, &mut keys, &conn_with(vec![]), Some(&mut state));
     assert_eq!(report.index, IndexOutcome::Accepted);
-    assert!(report.pending_keys.is_empty());
+    assert_eq!(report.key_set, KeySetOutcome::Accepted);
     assert_eq!(report.streams["notes"], StreamOutcome::Accepted);
     assert!(state.key_sets["acme.example"].get("b").is_some());
 }
@@ -703,7 +702,7 @@ fn endorsed_rotation_is_kept_in_state() {
 }
 
 #[test]
-fn rolled_back_key_set_is_a_fetch_error_and_held_set_stays() {
+fn rolled_back_key_set_is_refused_and_held_set_stays() {
     let a = key_a();
     let mut source = build_feed(
         "2026-11-24T10:00:00Z",
@@ -724,17 +723,12 @@ fn rolled_back_key_set_is_a_fetch_error_and_held_set_stays() {
     let report = run(&mut source, &mut keys, &conn_with(vec![]), Some(&mut state));
     assert_eq!(report.index, IndexOutcome::Accepted);
     assert_eq!(report.streams["notes"], StreamOutcome::Accepted);
-    assert_eq!(report.fetch_errors.len(), 1);
-    assert!(
-        report.fetch_errors[0].contains("key_set_rollback"),
-        "{:?}",
-        report.fetch_errors
-    );
+    assert_eq!(report.key_set, KeySetOutcome::Refused(Code::KeySetRollback));
     assert_eq!(state.key_sets["acme.example"], held);
 }
 
 #[test]
-fn key_set_for_another_publisher_is_a_fetch_error() {
+fn key_set_for_another_publisher_is_bad_key_set() {
     let a = key_a();
     let mut source = build_feed(
         "2026-11-24T10:00:00Z",
@@ -754,12 +748,7 @@ fn key_set_for_another_publisher_is_a_fetch_error() {
     let mut keys = FixedKeys(Ok(Some((set, None))), Vec::new());
     let mut state = ReaderState::default();
     let report = run(&mut source, &mut keys, &conn_with(vec![]), Some(&mut state));
-    assert_eq!(report.fetch_errors.len(), 1);
-    assert!(
-        report.fetch_errors[0].contains("other.example"),
-        "{:?}",
-        report.fetch_errors
-    );
+    assert_eq!(report.key_set, KeySetOutcome::Refused(Code::BadKeySet));
     // Nothing trusts acme.example's key, so the signed index names an unknown key.
     assert_eq!(report.index, IndexOutcome::Refused(Code::UnknownKey));
     assert!(state.key_sets.is_empty());
@@ -786,8 +775,11 @@ fn key_source_error_keeps_held_set() {
     let report = run(&mut source, &mut keys, &conn_with(vec![]), Some(&mut state));
     assert_eq!(report.index, IndexOutcome::Accepted);
     assert_eq!(report.streams["notes"], StreamOutcome::Accepted);
-    assert_eq!(report.fetch_errors.len(), 1);
-    assert!(report.fetch_errors[0].contains("connection refused"));
+    assert!(
+        matches!(&report.key_set, KeySetOutcome::Failed(e) if e.contains("connection refused")),
+        "{:?}",
+        report.key_set
+    );
 }
 
 #[test]
@@ -1037,7 +1029,7 @@ fn served_key_set_makes_unsigned_index_refused_even_before_approval() {
     let set = key_set_bytes("2026-11-24T00:00:00Z", &[&a]);
     let mut keys = FixedKeys(Ok(Some((set, None))), Vec::new());
     let report = run(&mut source, &mut keys, &conn_with(vec![]), Some(&mut state));
-    assert_eq!(report.pending_keys, vec![pin(&a)]);
+    assert_eq!(report.key_set, KeySetOutcome::Pending(vec![pin(&a)]));
     assert_eq!(
         report.index,
         IndexOutcome::Refused(Code::UnsignedFromPinnedPublisher)
@@ -1109,7 +1101,9 @@ fn connection_urls_are_https_with_a_slash() {
     let none = json!({"method": "none"});
     let refused = [
         ("http://feeds.acme.example/track/", "https"),
-        ("http://127.0.0.2/track/", "https"),
+        ("http://128.0.0.1/track/", "https"),
+        ("http://127.0.0.256/track/", "https"),
+        ("http://127.example/track/", "https"),
         ("https://feeds.acme.example/track", "slash"),
         ("https://feeds.acme.example/track/?x=1", "slash"),
         ("https://feeds.acme.example//track/", "//"),
@@ -1126,6 +1120,7 @@ fn connection_urls_are_https_with_a_slash() {
     for url in [
         "https://feeds.acme.example/track/",
         "http://127.0.0.1:8080/feed/",
+        "http://127.0.0.2/feed/",
         "http://localhost/",
         "http://[::1]:9000/feed/",
     ] {
@@ -1173,7 +1168,9 @@ fn not_modified_echoes_the_etag() {
 }
 
 #[test]
-fn stale_index_with_endorsed_rotation_leaves_whole_state() {
+fn stale_index_with_endorsed_rotation_keeps_only_the_key_set() {
+    // The key steps run whatever happens to the index: an accepted key set
+    // is held from then on, and nothing else changes.
     let (a, b) = (key_a(), key_b());
     let mut source = build_feed(
         "2026-11-24T09:00:00Z",
@@ -1192,14 +1189,17 @@ fn stale_index_with_endorsed_rotation_leaves_whole_state() {
         "acme.example".to_owned(),
         KeySet::parse(&key_set_bytes("2026-11-01T00:00:00Z", &[&a])).unwrap(),
     );
-    let before = state.clone();
     let set = key_set_bytes("2026-11-24T00:00:00Z", &[&a, &b]);
     let sig = sign(&a, Context::Keys, &set).to_bytes();
-    let mut keys = FixedKeys(Ok(Some((set, Some(sig)))), Vec::new());
+    let mut keys = FixedKeys(Ok(Some((set.clone(), Some(sig)))), Vec::new());
+    let mut expected = state.clone();
+    expected
+        .key_sets
+        .insert("acme.example".to_owned(), KeySet::parse(&set).unwrap());
     let report = run(&mut source, &mut keys, &conn_with(vec![]), Some(&mut state));
     assert_eq!(report.index, IndexOutcome::Refused(Code::StaleFeed));
-    assert!(report.fetch_errors.is_empty(), "{:?}", report.fetch_errors);
-    assert_eq!(state, before);
+    assert_eq!(report.key_set, KeySetOutcome::Accepted);
+    assert_eq!(state, expected);
 }
 
 #[test]
@@ -1225,7 +1225,229 @@ fn partly_approved_key_set_is_not_accepted() {
     let set = key_set_bytes("2026-11-24T00:00:00Z", &[&a, &b, &c]);
     let mut keys = FixedKeys(Ok(Some((set, None))), Vec::new());
     let report = run(&mut source, &mut keys, &conn_with(vec![]), Some(&mut state));
-    assert_eq!(report.pending_keys, vec![pin(&c)]);
+    assert_eq!(report.key_set, KeySetOutcome::Pending(vec![pin(&c)]));
     assert_eq!(report.index, IndexOutcome::Accepted);
     assert_eq!(state.key_sets["acme.example"], held);
+}
+
+/// A key set of `keys`, with `revoked` marked revoked.
+fn key_set_revoking(updated_at: &str, keys: &[&SigningKey], revoked: &SigningKey) -> Vec<u8> {
+    let keys: Vec<Value> = keys
+        .iter()
+        .map(|k| {
+            let mut entry = json!({"id": k.id, "alg": "ed25519",
+                "public_key": b64url(&k.public().key), "created_at": "2026-11-01T00:00:00Z"});
+            if k.id == revoked.id {
+                entry["revoked_at"] = json!("2026-11-20T00:00:00Z");
+            }
+            entry
+        })
+        .collect();
+    serde_json::to_vec(&json!({"$type": "org.legiblerecords.keys", "version": 1,
+        "publisher": "acme.example", "updated_at": updated_at, "keys": keys}))
+    .unwrap()
+}
+
+#[test]
+fn revocation_counts_in_a_set_its_own_key_endorses() {
+    // R1: a stateless reader pins K; the publisher serves a set that revokes
+    // K, signed by K. The endorsement is bad, but the revocation still
+    // counts: what K signs is revoked_key.
+    let a = key_a();
+    let mut source = build_feed(
+        "2026-11-24T10:00:00Z",
+        &[Stream {
+            id: "notes",
+            published_at: "2026-11-24T10:00:00Z",
+            signer: Some(&a),
+        }],
+        Some(&a),
+    );
+    let set = key_set_revoking("2026-11-24T00:00:00Z", &[&a], &a);
+    let sig = sign(&a, Context::Keys, &set).to_bytes();
+    let mut keys = FixedKeys(Ok(Some((set, Some(sig)))), Vec::new());
+    let report = run(&mut source, &mut keys, &conn_with(vec![pin(&a)]), None);
+    assert_eq!(report.key_set, KeySetOutcome::Refused(Code::BadEndorsement));
+    assert_eq!(report.index, IndexOutcome::Refused(Code::RevokedKey));
+
+    // And a bundle K signed, checked on its own against the same trust.
+    let bundle = pack_with(
+        &[Input {
+            name: "note.json".to_owned(),
+            bytes: br#"{"$type":"example.note","version":1,"id":"n"}"#.to_vec(),
+        }],
+        &[],
+        &PackOptions {
+            signer: Some(&a),
+            ..PackOptions::default()
+        },
+    )
+    .unwrap();
+    let opened = legible_records::bundle::open(&bundle.zip, Default::default()).unwrap();
+    let mut trust = legible_records::keys::Trust {
+        pins: vec![pin(&a)],
+        ..Default::default()
+    };
+    trust
+        .revoking
+        .push(KeySet::parse(&key_set_revoking("2026-11-24T00:00:00Z", &[&a], &a)).unwrap());
+    assert_eq!(
+        legible_records::bundle::check_signature(&opened, &trust, Some("acme.example")),
+        Err(Code::RevokedKey)
+    );
+}
+
+#[test]
+fn a_rolled_back_set_that_passes_parsing_still_revokes() {
+    // R1 again, with state: the served set is refused as a rollback, yet the
+    // key it revokes is revoked, and what it signed is forgotten.
+    let (a, b) = (key_a(), key_b());
+    let mut source = build_feed(
+        "2026-11-24T10:00:00Z",
+        &[Stream {
+            id: "notes",
+            published_at: "2026-11-24T10:00:00Z",
+            signer: Some(&b),
+        }],
+        Some(&b),
+    );
+    let mut state = ReaderState::default();
+    state.key_sets.insert(
+        "acme.example".to_owned(),
+        KeySet::parse(&key_set_bytes("2026-11-24T00:00:00Z", &[&a, &b])).unwrap(),
+    );
+    state.streams.insert(
+        "old".to_owned(),
+        StreamState {
+            sha256: "0".repeat(64),
+            published_at: "2026-11-23T00:00:00Z".to_owned(),
+            signer: Some(Signer {
+                publisher: "acme.example".to_owned(),
+                key: "a".to_owned(),
+            }),
+        },
+    );
+    let older = key_set_revoking("2026-11-01T00:00:00Z", &[&a, &b], &a);
+    let mut keys = FixedKeys(Ok(Some((older, None))), Vec::new());
+    let report = run(&mut source, &mut keys, &conn_with(vec![]), Some(&mut state));
+    assert_eq!(report.key_set, KeySetOutcome::Refused(Code::KeySetRollback));
+    assert_eq!(
+        report.streams["old"],
+        StreamOutcome::Refused(Code::RevokedKey)
+    );
+    assert!(!state.streams.contains_key("old"));
+    assert_eq!(report.streams["notes"], StreamOutcome::Accepted);
+    // The held set isn't replaced.
+    assert!(state.key_sets["acme.example"]
+        .get("a")
+        .is_some_and(|k| k.revoked_at.is_none()));
+}
+
+#[test]
+fn revocation_reaches_a_reader_whose_index_is_unchanged() {
+    // The key set is fetched before the index, so a revocation is honoured
+    // on a poll that would have been a 304; the ETag isn't sent, the index
+    // is fetched whole, and the forgotten stream is reported.
+    let (a, b) = (key_a(), key_b());
+    let mut source = build_feed(
+        "2026-11-24T10:00:00Z",
+        &[Stream {
+            id: "notes",
+            published_at: "2026-11-24T10:00:00Z",
+            signer: Some(&a),
+        }],
+        Some(&b),
+    );
+    source.etag = Some("\"v1\"".to_owned());
+    let mut state = ReaderState::default();
+    state.key_sets.insert(
+        "acme.example".to_owned(),
+        KeySet::parse(&key_set_bytes("2026-11-01T00:00:00Z", &[&a, &b])).unwrap(),
+    );
+    let report = run(
+        &mut source,
+        &mut NoKeySource,
+        &conn_with(vec![]),
+        Some(&mut state),
+    );
+    assert_eq!(report.streams["notes"], StreamOutcome::Accepted);
+    assert_eq!(report.etag.as_deref(), Some("\"v1\""));
+    let revoking = key_set_revoking("2026-11-24T00:00:00Z", &[&a, &b], &a);
+    let mut keys = FixedKeys(Ok(Some((revoking, None))), Vec::new());
+    let options = PullOptions {
+        etag: report.etag.clone(),
+        ..options()
+    };
+    source.requests.clear();
+    let mut delivered = 0;
+    let report = pull(
+        &mut source,
+        &mut keys,
+        &conn_with(vec![]),
+        Some(&mut state),
+        &mut |_| {
+            delivered += 1;
+            Ok(())
+        },
+        &options,
+    );
+    assert_eq!(report.key_set, KeySetOutcome::Accepted);
+    assert_eq!(report.index, IndexOutcome::Accepted);
+    assert_eq!(
+        report.streams["notes"],
+        StreamOutcome::Refused(Code::RevokedKey)
+    );
+    assert_eq!(delivered, 0);
+    assert_eq!(report.etag, None);
+    assert!(!state.streams.contains_key("notes"));
+    // The index (signed by b) was accepted, so its watermark stands.
+    assert_eq!(
+        state.feed_signer,
+        Some(Signer {
+            publisher: "acme.example".to_owned(),
+            key: "b".to_owned()
+        })
+    );
+}
+
+#[test]
+fn state_files_without_signers_are_still_read() {
+    let old = br#"{"$type":"legible-reader-state","version":1,
+        "feed_updated_at":"2026-11-24T10:00:00Z",
+        "streams":{"notes":{"sha256":"0000000000000000000000000000000000000000000000000000000000000000",
+                            "published_at":"2026-11-24T10:00:00Z"}},
+        "key_sets":{},
+        "approved":[{"publisher":"acme.example","id":"a","public_key":"6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw"}]}"#;
+    let state = ReaderState::parse(old).unwrap();
+    assert_eq!(state.feed_signer, None);
+    assert_eq!(state.streams["notes"].signer, None);
+    assert_eq!(state.approved[0].alg, "ed25519");
+    // Written back, it has the new fields.
+    let value: Value = serde_json::from_slice(&state.to_bytes()).unwrap();
+    assert_eq!(value["feed_signer"], Value::Null);
+    assert_eq!(value["streams"]["notes"]["signer"], Value::Null);
+    assert_eq!(value["approved"][0]["alg"], "ed25519");
+}
+
+#[test]
+fn bad_feed_says_why() {
+    let mut source = build_feed(
+        "2026-12-03T00:00:00Z",
+        &[Stream {
+            id: "notes",
+            published_at: "2026-11-24T10:00:00Z",
+            signer: None,
+        }],
+        None,
+    );
+    let report = run(&mut source, &mut NoKeySource, &conn_with(vec![]), None);
+    assert_eq!(report.index, IndexOutcome::Refused(Code::BadFeed));
+    assert!(
+        report
+            .index_detail
+            .as_deref()
+            .is_some_and(|d| d.contains("24 hours")),
+        "{:?}",
+        report.index_detail
+    );
 }

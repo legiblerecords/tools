@@ -19,11 +19,13 @@ pub mod state;
 pub use connection::{parse_connection, Auth, Connection, Location};
 pub use index::{check_bundle_paths, parse_feed, Feed, StreamEntry};
 pub use publish::{collectable, next_published_at, render_feed, PublishState};
-pub use pull::{pull, Delivered, IndexOutcome, PullOptions, PullReport, StreamOutcome};
+pub use pull::{
+    pull, Delivered, IndexOutcome, KeySetOutcome, PullOptions, PullReport, StreamOutcome,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use source::DirSource;
 pub use source::{Fetched, KeySetFiles, KeySource, NoKeySource, Source};
-pub use state::{ReaderState, StreamState};
+pub use state::{ReaderState, Signer, StreamState};
 
 /// The most a feed index (`feed.json`, or `feed.json.age` and what it
 /// decrypts to), its `feed.sig`, or a key set may hold.

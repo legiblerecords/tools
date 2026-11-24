@@ -27,12 +27,10 @@ pub enum KeyState {
 pub struct KeyEntry {
     pub id: String,
     pub alg: String,
-    /// The key's bytes. Only meaningful when `alg` is `ed25519`; for an
-    /// algorithm this reader doesn't know it is all zeros unless the text
-    /// happens to be 32 bytes of base64url.
+    /// The key's 32 bytes, decoded from canonical base64url whatever its
+    /// `alg`. Keys are compared by these bytes, never by their text.
     pub public_key: [u8; 32],
-    /// The public key exactly as the set writes it. Keys are compared by this
-    /// text, so a key of an unknown algorithm still counts for rollback.
+    /// The public key exactly as the set writes it.
     pub public_key_text: String,
     pub created_at: String,
     pub retired_at: Option<String>,
@@ -49,12 +47,6 @@ impl KeyEntry {
         } else {
             KeyState::Active
         }
-    }
-
-    /// Whether this reader may trust the key at all: it ignores a key whose
-    /// `alg` it doesn't know.
-    fn usable(&self) -> bool {
-        self.alg == "ed25519"
     }
 }
 
@@ -89,70 +81,136 @@ fn optional_instant(
     }
 }
 
+/// How strictly [`KeySet::parse`] reads: as a valid record of its type
+/// only, or with every rule of § Key sets step 1.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Strictness {
+    Record,
+    Rules,
+}
+
+fn parse_set(bytes: &[u8], strictness: Strictness) -> Result<KeySet, Code> {
+    let value: Value = serde_json::from_slice(bytes).map_err(|_| Code::BadKeySet)?;
+    let object = value.as_object().ok_or(Code::BadKeySet)?;
+    if text(object, "$type")? != KEYS_TYPE || object.get("version") != Some(&Value::from(1)) {
+        return Err(Code::BadKeySet);
+    }
+    let publisher = text(object, "publisher")?;
+    if !is_publisher(&publisher) {
+        return Err(Code::BadKeySet);
+    }
+    let updated_at = text(object, "updated_at")?;
+    let updated = time::parse(&updated_at).map_err(|_| Code::BadKeySet)?;
+    let listed = object
+        .get("keys")
+        .and_then(Value::as_array)
+        .filter(|keys| !keys.is_empty())
+        .ok_or(Code::BadKeySet)?;
+    let strict = strictness == Strictness::Rules;
+    let mut keys = Vec::with_capacity(listed.len());
+    // Repeats are refused as the entries are read, before anything looks a
+    // key up by id or by its bytes.
+    let (mut ids, mut publics) = (BTreeSet::new(), BTreeSet::new());
+    for entry in listed {
+        let entry = entry.as_object().ok_or(Code::BadKeySet)?;
+        let id = text(entry, "id")?;
+        if !is_key_id(&id) {
+            return Err(Code::BadKeySet);
+        }
+        let alg = text(entry, "alg")?;
+        let public_key_text = text(entry, "public_key")?;
+        // The schema's pattern: 43 characters of the base64url alphabet.
+        let shaped = public_key_text.len() == 43
+            && public_key_text
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_');
+        if !shaped {
+            return Err(Code::BadKeySet);
+        }
+        // Canonical: the unused low bits of the last character are zero.
+        let decoded = from_b64url(&public_key_text)
+            .ok()
+            .and_then(|b| <[u8; 32]>::try_from(b).ok());
+        let public_key = match decoded {
+            Some(key) => key,
+            None if strict => return Err(Code::BadKeySet),
+            None => [0; 32],
+        };
+        if strict && (!ids.insert(id.clone()) || !publics.insert(public_key)) {
+            return Err(Code::BadKeySet);
+        }
+        let created_at = text(entry, "created_at")?;
+        time::parse(&created_at).map_err(|_| Code::BadKeySet)?;
+        keys.push(KeyEntry {
+            id,
+            alg,
+            public_key,
+            public_key_text,
+            created_at,
+            retired_at: optional_instant(entry, "retired_at")?,
+            revoked_at: optional_instant(entry, "revoked_at")?,
+        });
+    }
+    Ok(KeySet {
+        publisher,
+        updated_at,
+        keys,
+        bytes: bytes.to_vec(),
+        updated,
+    })
+}
+
+/// How far ahead of the reader's clock a timestamp may be: 24 hours, for
+/// clocks that differ.
+pub const MAX_SKEW_MILLIS: i64 = 24 * 60 * 60 * 1000;
+
+/// Whether `at` is more than 24 hours after the reader's clock `now`.
+pub fn too_far_ahead(at: Instant, now: Instant) -> bool {
+    at > now.plus_millis(MAX_SKEW_MILLIS)
+}
+
+/// Whether `bytes` are a valid `org.legiblerecords.keys` record, whatever
+/// else is wrong with them as a key set. A publisher that serves one shows
+/// it signs, so a reader trusts it for the unsigned rule (feeds.md § Trust)
+/// even when it refuses the set.
+pub fn is_key_set_record(bytes: &[u8]) -> bool {
+    parse_set(bytes, Strictness::Record).is_ok()
+}
+
 impl KeySet {
-    /// Reads a key set. One that isn't the JSON of its type, or that lists a
-    /// key `id` twice, is `bad_key_set`.
+    /// Reads a key set (§ Key sets, step 1). One that isn't JSON or isn't a
+    /// valid record of its type, lists a key `id` twice, lists one public key
+    /// under two ids, or has a `public_key` that isn't canonical base64url of
+    /// 32 bytes, is `bad_key_set`. The checks that need the reader's clock
+    /// and the domain the set was fetched from are [`KeySet::check_served`].
     pub fn parse(bytes: &[u8]) -> Result<KeySet, Code> {
-        let value: Value = serde_json::from_slice(bytes).map_err(|_| Code::BadKeySet)?;
-        let object = value.as_object().ok_or(Code::BadKeySet)?;
-        if text(object, "$type")? != KEYS_TYPE || object.get("version") != Some(&Value::from(1)) {
+        parse_set(bytes, Strictness::Rules)
+    }
+
+    /// The rest of step 1 for a set as served: its `updated_at` may be no
+    /// more than 24 hours after `now`, and its `publisher` must be the
+    /// domain it was fetched from, when that is known (`bad_key_set`).
+    pub fn check_served(&self, now: Instant, fetched_from: Option<&str>) -> Result<(), Code> {
+        if too_far_ahead(self.updated, now) {
             return Err(Code::BadKeySet);
         }
-        let publisher = text(object, "publisher")?;
-        if !is_publisher(&publisher) {
+        if fetched_from.is_some_and(|domain| domain != self.publisher) {
             return Err(Code::BadKeySet);
         }
-        let updated_at = text(object, "updated_at")?;
-        let updated = time::parse(&updated_at).map_err(|_| Code::BadKeySet)?;
-        let listed = object
-            .get("keys")
-            .and_then(Value::as_array)
-            .filter(|keys| !keys.is_empty())
-            .ok_or(Code::BadKeySet)?;
-        let mut keys = Vec::with_capacity(listed.len());
-        // Duplicates are refused as the entries are read, before anything
-        // looks a key up by id.
-        let mut seen = BTreeSet::new();
-        for entry in listed {
-            let entry = entry.as_object().ok_or(Code::BadKeySet)?;
-            let id = text(entry, "id")?;
-            if !is_key_id(&id) || !seen.insert(id.clone()) {
-                return Err(Code::BadKeySet);
-            }
-            let alg = text(entry, "alg")?;
-            let public_key_text = text(entry, "public_key")?;
-            let decoded = from_b64url(&public_key_text)
-                .ok()
-                .and_then(|b| <[u8; 32]>::try_from(b).ok());
-            let public_key = match decoded {
-                Some(key) => key,
-                None if alg == "ed25519" => return Err(Code::BadKeySet),
-                None => [0; 32],
-            };
-            let created_at = text(entry, "created_at")?;
-            time::parse(&created_at).map_err(|_| Code::BadKeySet)?;
-            keys.push(KeyEntry {
-                id,
-                alg,
-                public_key,
-                public_key_text,
-                created_at,
-                retired_at: optional_instant(entry, "retired_at")?,
-                revoked_at: optional_instant(entry, "revoked_at")?,
-            });
-        }
-        Ok(KeySet {
-            publisher,
-            updated_at,
-            keys,
-            bytes: bytes.to_vec(),
-            updated,
-        })
+        Ok(())
     }
 
     /// The key with this id.
     pub fn get(&self, id: &str) -> Option<&KeyEntry> {
         self.keys.iter().find(|key| key.id == id)
+    }
+
+    /// Whether this set revokes the key `id`, or the public key `bytes`
+    /// under any id.
+    pub fn revokes(&self, id: &str, bytes: Option<&[u8; 32]>) -> bool {
+        self.keys
+            .iter()
+            .any(|k| k.revoked_at.is_some() && (k.id == id || Some(&k.public_key) == bytes))
     }
 
     fn has_repeated_id(&self) -> bool {
@@ -161,12 +219,54 @@ impl KeySet {
     }
 }
 
-/// A key a reader holds from its configuration.
+/// A key a reader holds from its configuration (a pin), or that a person
+/// approved: a publisher, a key id, an `alg` and a public key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pin {
     pub publisher: String,
     pub id: String,
+    pub alg: String,
     pub public_key: [u8; 32],
+}
+
+/// Reads a pin from its four fields, as a connection file, a reader state's
+/// `approved`, the command line and the npm package all give them: a
+/// publisher (a lowercase domain), a key id, `alg` `ed25519` (the only one
+/// this reader can verify with) and a public key in canonical base64url
+/// of 32 bytes. The error says which field is wrong, without echoing the key.
+pub fn parse_pin(publisher: &str, id: &str, alg: &str, public_key: &str) -> Result<Pin, String> {
+    if !is_publisher(publisher) {
+        return Err(format!(
+            "publisher {publisher:?} is not a domain: use a lowercase domain such as acme.example, with no scheme, port or path"
+        ));
+    }
+    if !is_key_id(id) {
+        return Err(format!(
+            "id {id:?} is not a key id: use lowercase letters, digits, dots and hyphens, up to 64, such as 2026-11"
+        ));
+    }
+    if alg != "ed25519" {
+        return Err(format!("alg {alg:?} is not ed25519"));
+    }
+    let public_key = from_b64url(public_key)
+        .ok()
+        .and_then(|b| <[u8; 32]>::try_from(b).ok())
+        .ok_or("public_key is not 32 bytes of canonical base64url without padding")?;
+    Ok(Pin {
+        publisher: publisher.to_owned(),
+        id: id.to_owned(),
+        alg: alg.to_owned(),
+        public_key,
+    })
+}
+
+/// Reads a pin written `<publisher>/<id>=<public_key>`, as `--pin` and
+/// `--approve` take it; its `alg` is `ed25519`.
+pub fn parse_pin_text(text: &str) -> Result<Pin, String> {
+    let shape = "expected <publisher>/<id>=<public_key>, such as acme.example/2026-11=<base64url>";
+    let (name, key) = text.split_once('=').ok_or(shape)?;
+    let (publisher, id) = name.split_once('/').ok_or(shape)?;
+    parse_pin(publisher, id, "ed25519", key).map_err(|e| format!("{e}; {shape}"))
 }
 
 /// What a reader does with a key set that broke no rule.
@@ -177,24 +277,70 @@ pub enum KeySetDecision {
     NeedsApproval,
 }
 
-/// Whether a key set that adds a key is accepted: without an endorsement it
-/// waits for a person, and one that adds none is accepted.
-fn unendorsed(adds_key: bool) -> KeySetDecision {
-    if adds_key {
-        KeySetDecision::NeedsApproval
-    } else {
-        KeySetDecision::Accepted
+/// Every `(alg, public key)` the reader's anchors give for `publisher`'s key
+/// `id`: its pins and approved keys (`anchors`), and the held set's entry.
+fn sources(
+    held: Option<&KeySet>,
+    anchors: &[Pin],
+    publisher: &str,
+    id: &str,
+) -> Vec<(String, [u8; 32])> {
+    let mut found: Vec<(String, [u8; 32])> = Vec::new();
+    let from_anchors = anchors
+        .iter()
+        .filter(|a| a.publisher == publisher && a.id == id)
+        .map(|a| (a.alg.clone(), a.public_key));
+    let from_held = held
+        .filter(|set| set.publisher == publisher)
+        .and_then(|set| set.get(id))
+        .map(|k| (k.alg.clone(), k.public_key));
+    for source in from_anchors.chain(from_held) {
+        if !found.contains(&source) {
+            found.push(source);
+        }
     }
+    found
 }
 
-/// Decides about `new`, served with `sig` (the bytes of `keys.sig`) if it came
-/// with one, following § Key sets in order.
+/// The keys `new` adds: those no anchor has with the same id, `alg` and
+/// public key. A key whose public key or `alg` changed under a held id is
+/// new. `anchors` are the reader's pins and approved keys; `previous` the
+/// set it holds.
+pub fn new_keys<'a>(
+    previous: Option<&KeySet>,
+    anchors: &[Pin],
+    new: &'a KeySet,
+) -> Vec<&'a KeyEntry> {
+    new.keys
+        .iter()
+        .filter(|k| {
+            !sources(previous, anchors, &new.publisher, &k.id)
+                .contains(&(k.alg.clone(), k.public_key))
+        })
+        .collect()
+}
+
+/// Who a `keys.sig` names, if it is the signature file of § Signed bundles:
+/// JSON with the four string members, `alg` `ed25519` and a canonical
+/// 64-byte signature. Every failure is `bad_endorsement`.
+fn endorsement_file(sig: &[u8]) -> Result<SignatureFile, Code> {
+    SignatureFile::parse(sig).map_err(|_| Code::BadEndorsement)
+}
+
+/// Decides about `new`, served with `sig` (the bytes of `keys.sig`) if it
+/// came with one, following § Key sets in order: rollback, then
+/// endorsement, then whether it adds a key.
 ///
-/// `previous` is the last key set the reader accepted. A reader that keeps
-/// nothing between runs passes `None` and its `pins` instead.
+/// `previous` is the last key set the reader accepted, or `None`; `anchors`
+/// are its pinned and approved keys (a stateless reader passes its pins and
+/// `None`). A `keys.sig` by a key that is no anchor, or one the anchors
+/// disagree about, is no endorsement rather than a bad one.
+///
+/// Step 1's checks that need the reader's clock or where the set came from
+/// are [`KeySet::check_served`]; [`decide_key_set`] runs them all.
 pub fn accept_key_set(
     previous: Option<&KeySet>,
-    pins: &[Pin],
+    anchors: &[Pin],
     new: &KeySet,
     sig: Option<&[u8]>,
 ) -> Result<KeySetDecision, Code> {
@@ -203,175 +349,226 @@ pub fn accept_key_set(
     if new.has_repeated_id() || previous.is_some_and(KeySet::has_repeated_id) {
         return Err(Code::BadKeySet);
     }
-    // What the reader holds, as (id, public key text).
-    let held: Vec<(&str, String)> = match previous {
-        Some(previous) => {
-            // 2. Rollback, before any endorsement is looked at.
-            if new.publisher != previous.publisher {
-                return Err(Code::BadEndorsement);
-            }
-            if new.updated < previous.updated {
-                return Err(Code::KeySetRollback);
-            }
-            for old in &previous.keys {
-                let now = new.get(&old.id).ok_or(Code::KeySetRollback)?;
-                if (old.retired_at.is_some() && now.retired_at.is_none())
-                    || (old.revoked_at.is_some() && now.revoked_at.is_none())
-                {
-                    return Err(Code::KeySetRollback);
-                }
-            }
-            // A compromised key can't come back under a fresh id.
-            let revived = previous
-                .keys
-                .iter()
-                .filter(|old| old.revoked_at.is_some())
-                .any(|old| {
-                    new.keys
-                        .iter()
-                        .any(|k| k.public_key_text == old.public_key_text && k.id != old.id)
-                });
-            if revived {
-                return Err(Code::KeySetRollback);
-            }
-            previous
-                .keys
-                .iter()
-                .map(|k| (k.id.as_str(), k.public_key_text.clone()))
-                .collect()
+    let publisher = new.publisher.as_str();
+    // 2. Rollback, before any endorsement is looked at.
+    if let Some(previous) = previous {
+        if previous.publisher != publisher {
+            return Err(Code::BadEndorsement);
         }
-        None => pins
+        if new.updated < previous.updated {
+            return Err(Code::KeySetRollback);
+        }
+        for old in &previous.keys {
+            let now = new.get(&old.id).ok_or(Code::KeySetRollback)?;
+            if (old.retired_at.is_some() && now.retired_at.is_none())
+                || (old.revoked_at.is_some() && now.revoked_at.is_none())
+            {
+                return Err(Code::KeySetRollback);
+            }
+        }
+        // A compromised key can't come back under a fresh id.
+        let revived = previous
+            .keys
             .iter()
-            .filter(|pin| pin.publisher == new.publisher)
-            .map(|pin| (pin.id.as_str(), crate::sign::b64url(&pin.public_key)))
-            .collect(),
+            .filter(|old| old.revoked_at.is_some())
+            .any(|old| {
+                new.keys
+                    .iter()
+                    .any(|k| k.public_key == old.public_key && k.id != old.id)
+            });
+        if revived {
+            return Err(Code::KeySetRollback);
+        }
+    }
+    let held = previous;
+    let adds_key = !new_keys(held, anchors, new).is_empty();
+    let unendorsed = if adds_key {
+        KeySetDecision::NeedsApproval
+    } else {
+        KeySetDecision::Accepted
     };
-    // A key is new when the reader holds no key with its id and public key.
-    let adds_key = new.keys.iter().any(|k| {
-        !held
-            .iter()
-            .any(|(id, key)| *id == k.id && *key == k.public_key_text)
-    });
-
     let Some(sig) = sig else {
-        return Ok(unendorsed(adds_key));
+        return Ok(unendorsed);
     };
-    // Who the signature file says signed, read leniently: a file too broken to
-    // name anyone is a bad endorsement.
-    let named: Value = serde_json::from_slice(sig).map_err(|_| Code::BadEndorsement)?;
-    let (named_publisher, named_key) = match (
-        named.get("publisher").and_then(Value::as_str),
-        named.get("key").and_then(Value::as_str),
-    ) {
-        (Some(publisher), Some(key)) => (publisher, key),
-        _ => return Err(Code::BadEndorsement),
-    };
-    if named_publisher != new.publisher {
+    // 3. Endorsement: every failure is bad_endorsement.
+    let file = endorsement_file(sig)?;
+    if file.publisher != publisher {
         return Err(Code::BadEndorsement);
     }
-    // The new set may retire the endorsing key but not revoke it.
-    let revoked_now = new.get(named_key).is_some_and(|k| k.revoked_at.is_some());
-    let endorser: Option<[u8; 32]> = match previous {
-        Some(previous) => {
-            // 3. Active in the previous set.
-            match previous.get(named_key) {
-                Some(k) if k.usable() && k.state() == KeyState::Active && !revoked_now => {
-                    Some(k.public_key)
-                }
-                _ => return Err(Code::BadEndorsement),
-            }
-        }
-        None => {
-            // Stateless: only a pinned key the new set doesn't revoke counts.
-            // Anything else is no endorsement at all, not a bad one.
-            pins.iter()
-                .find(|pin| pin.publisher == new.publisher && pin.id == named_key)
-                .filter(|_| !revoked_now)
-                .map(|pin| pin.public_key)
-        }
+    let found = sources(held, anchors, publisher, &file.key);
+    let [(alg, endorser)] = found.as_slice() else {
+        // No anchor, or anchors that disagree: no endorsement.
+        return Ok(unendorsed);
     };
-    let Some(endorser) = endorser else {
-        return Ok(unendorsed(adds_key));
-    };
-    let file = SignatureFile::parse(sig).map_err(|_| Code::BadEndorsement)?;
+    // An anchor that may not endorse: retired or revoked in the held set,
+    // revoked (by id or bytes) there, or revoked by the new set itself.
+    if held
+        .and_then(|set| set.get(&file.key))
+        .is_some_and(|k| k.retired_at.is_some() || k.revoked_at.is_some())
+    {
+        return Err(Code::BadEndorsement);
+    }
+    if held.is_some_and(|set| set.revokes(&file.key, Some(endorser))) {
+        return Err(Code::BadEndorsement);
+    }
+    if new.revokes(&file.key, Some(endorser)) {
+        return Err(Code::BadEndorsement);
+    }
+    if alg != "ed25519" {
+        return Err(Code::BadEndorsement);
+    }
     let key = PublicKey {
-        publisher: new.publisher.clone(),
-        id: named_key.to_owned(),
-        key: endorser,
+        publisher: publisher.to_owned(),
+        id: file.key.clone(),
+        key: *endorser,
     };
     verify(&key, Context::Keys, &new.bytes, &file).map_err(|_| Code::BadEndorsement)?;
     // 4. A valid endorsement accepts the set, new keys included.
     Ok(KeySetDecision::Accepted)
 }
 
+/// What a reader decided about a key set as served.
+#[derive(Clone, Debug)]
+pub struct KeySetVerdict {
+    /// The decision, or the code the set is refused with.
+    pub outcome: Result<KeySetDecision, Code>,
+    /// The set, when it passed § Key sets step 1 (it parses, isn't too far
+    /// ahead of the reader's clock, and names the domain it came from). Its
+    /// revocations count whatever the outcome; it is held only if accepted.
+    pub set: Option<KeySet>,
+    /// The keys it adds without a valid endorsement, when it waits for
+    /// approval.
+    pub pending: Vec<Pin>,
+}
+
+/// Decides about a key set as served (`keys_json` and, if there is one,
+/// `keys_sig`), running every step of § Key sets: step 1 with the reader's
+/// clock `now` and the domain the set was `fetched_from` (when known), then
+/// [`accept_key_set`] against the held set `previous` and the reader's
+/// pinned and approved keys `anchors`.
+pub fn decide_key_set(
+    previous: Option<&KeySet>,
+    anchors: &[Pin],
+    keys_json: &[u8],
+    keys_sig: Option<&[u8]>,
+    now: Instant,
+    fetched_from: Option<&str>,
+) -> KeySetVerdict {
+    let refused = |code| KeySetVerdict {
+        outcome: Err(code),
+        set: None,
+        pending: Vec::new(),
+    };
+    let set = match KeySet::parse(keys_json) {
+        Ok(set) => set,
+        Err(code) => return refused(code),
+    };
+    if let Err(code) = set.check_served(now, fetched_from) {
+        return refused(code);
+    }
+    let outcome = accept_key_set(previous, anchors, &set, keys_sig);
+    let pending = match outcome {
+        Ok(KeySetDecision::NeedsApproval) => new_keys(previous, anchors, &set)
+            .into_iter()
+            .map(|k| Pin {
+                publisher: set.publisher.clone(),
+                id: k.id.clone(),
+                alg: k.alg.clone(),
+                public_key: k.public_key,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    KeySetVerdict {
+        outcome,
+        set: Some(set),
+        pending,
+    }
+}
+
 /// What a reader finds for a publisher and key id.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Lookup {
     Found(PublicKey, KeyState),
+    /// The key's `alg` isn't one this reader knows: `unknown_alg`.
+    UnknownAlg,
+    /// No trusted key has that id, or the reader's sources disagree about
+    /// it: `unknown_key`.
     Unknown,
 }
 
-/// The keys a reader trusts.
+/// The keys a reader trusts (feeds.md § Trust).
 #[derive(Clone, Debug, Default)]
 pub struct Trust {
     /// Keys from the reader's configuration.
     pub pins: Vec<Pin>,
-    /// The last key set accepted for each publisher.
+    /// The key set held for each publisher: the last one accepted,
+    /// including one accepted on this poll.
     pub key_sets: BTreeMap<String, KeySet>,
     /// Keys a person approved, trusted like pins.
     pub approved: Vec<Pin>,
+    /// Key sets served on this poll that aren't held (waiting for approval,
+    /// or refused after step 1): their revocations count, nothing else.
+    pub revoking: Vec<KeySet>,
+    /// Publishers that served a valid key set record on this poll, whatever
+    /// became of it: a reader trusts them for the unsigned rule.
+    pub served: BTreeSet<String>,
 }
 
 impl Trust {
-    /// The key a publisher's id names. A key set's word on a key outweighs a
-    /// pin's, so a pinned key its set revokes is `Revoked`.
+    fn anchors(&self) -> Vec<Pin> {
+        self.pins.iter().chain(&self.approved).cloned().collect()
+    }
+
+    /// Whether a held or revoking set for `publisher` revokes the key `id`,
+    /// or the public key `bytes` under any id.
+    fn revokes(&self, publisher: &str, id: &str, bytes: Option<&[u8; 32]>) -> bool {
+        self.key_sets
+            .get(publisher)
+            .into_iter()
+            .chain(self.revoking.iter().filter(|s| s.publisher == publisher))
+            .any(|set| set.revokes(id, bytes))
+    }
+
+    /// The key a publisher's id names, as § Trust defines it: the held set's
+    /// entry, a pin and an approved key must agree on its `alg` and bytes,
+    /// or the id names no trusted key; a key a held or revoking set revokes,
+    /// by id or by its bytes under another id, is `Revoked` even if pinned;
+    /// a key whose `alg` this reader doesn't know is `UnknownAlg`.
     pub fn lookup(&self, publisher: &str, id: &str) -> Lookup {
-        let set = self.key_sets.get(publisher);
-        if let Some(key) = set.and_then(|set| set.get(id)) {
-            if key.usable() {
-                return Lookup::Found(
-                    PublicKey {
-                        publisher: publisher.to_owned(),
-                        id: id.to_owned(),
-                        key: key.public_key,
-                    },
-                    key.state(),
-                );
-            }
-            // An unknown algorithm is ignored, and a pin can't stand in for it.
+        let held = self.key_sets.get(publisher);
+        let found = sources(held, &self.anchors(), publisher, id);
+        let [(alg, key)] = found.as_slice() else {
             return Lookup::Unknown;
+        };
+        let public = PublicKey {
+            publisher: publisher.to_owned(),
+            id: id.to_owned(),
+            key: *key,
+        };
+        if self.revokes(publisher, id, Some(key)) {
+            return Lookup::Found(public, KeyState::Revoked);
         }
-        let pinned = self
-            .pins
+        if alg != "ed25519" {
+            return Lookup::UnknownAlg;
+        }
+        let state = held
+            .and_then(|set| set.get(id))
+            .map_or(KeyState::Active, KeyEntry::state);
+        Lookup::Found(public, state)
+    }
+
+    /// Whether the key `publisher` / `id`, which signed something the reader
+    /// accepted before, has been revoked since: by id, or by its bytes under
+    /// another id, in a held or revoking set.
+    pub fn is_revoked(&self, publisher: &str, id: &str) -> bool {
+        let found = sources(self.key_sets.get(publisher), &self.anchors(), publisher, id);
+        if found.is_empty() {
+            return self.revokes(publisher, id, None);
+        }
+        found
             .iter()
-            .chain(&self.approved)
-            .find(|pin| pin.publisher == publisher && pin.id == id);
-        match pinned {
-            Some(pin) => {
-                // A key the set revokes under another id is revoked too.
-                let revoked = set.is_some_and(|set| {
-                    set.keys.iter().any(|k| {
-                        k.usable()
-                            && k.public_key == pin.public_key
-                            && k.state() == KeyState::Revoked
-                    })
-                });
-                let state = if revoked {
-                    KeyState::Revoked
-                } else {
-                    KeyState::Active
-                };
-                Lookup::Found(
-                    PublicKey {
-                        publisher: pin.publisher.clone(),
-                        id: pin.id.clone(),
-                        key: pin.public_key,
-                    },
-                    state,
-                )
-            }
-            None => Lookup::Unknown,
-        }
+            .any(|(_, key)| self.revokes(publisher, id, Some(key)))
     }
 
     /// Whether the reader holds a pinned (or approved) key for this publisher.
@@ -382,10 +579,13 @@ impl Trust {
             .any(|pin| pin.publisher == publisher)
     }
 
-    /// Whether the reader trusts a key of this publisher: pinned, approved,
-    /// or in a key set it holds. A reader that does refuses this publisher's
-    /// unsigned bundles and feed indexes.
+    /// Whether the reader trusts this publisher (§ Trust): it has a pinned
+    /// or approved key for it, holds its key set, or was served a valid key
+    /// set record by it on this poll. A reader that does refuses this
+    /// publisher's unsigned bundles and feed indexes.
     pub fn trusts_publisher(&self, publisher: &str) -> bool {
-        self.pins_publisher(publisher) || self.key_sets.contains_key(publisher)
+        self.pins_publisher(publisher)
+            || self.key_sets.contains_key(publisher)
+            || self.served.contains(publisher)
     }
 }

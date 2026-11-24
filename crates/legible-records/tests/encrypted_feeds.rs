@@ -29,6 +29,7 @@ fn pin() -> Pin {
     Pin {
         publisher: public.publisher,
         id: public.id,
+        alg: "ed25519".to_owned(),
         public_key: public.key,
     }
 }

@@ -7,7 +7,7 @@
 //! Schema 2020-12.
 
 use legible_records::code::Code;
-use legible_records::keys::{KeySet, Pin, Trust};
+use legible_records::keys::{parse_pin, parse_pin_text, KeySet, Trust};
 use legible_records::short_form::{self, Options};
 use legible_records::sign::{self, SignatureFile, SigningKey};
 use legible_records::{bundle, compat, lint, time, yaml};
@@ -330,12 +330,31 @@ impl Bundle {
         self.opened.files.get(path).cloned()
     }
 
-    /// Checks hashes, the file list and references. `schemas` are expanded
-    /// schemas; record references are checked for the types among them.
-    /// Returns `{ problems: string[], uncheckedTypes: string[] }`.
-    pub fn verify(&self, schemas: JsValue) -> Result<JsValue, JsError> {
+    /// The manifest's bytes exactly as stored: what a signature covers.
+    #[wasm_bindgen(js_name = manifestBytes)]
+    pub fn manifest_bytes(&self) -> Vec<u8> {
+        self.opened.manifest_bytes.clone()
+    }
+
+    /// `manifest.sig`'s bytes exactly as stored, or `undefined` for an
+    /// unsigned bundle.
+    pub fn signature(&self) -> Option<Vec<u8>> {
+        self.opened.signature.clone()
+    }
+
+    /// Checks hashes, the file list and references, and that `published_at`
+    /// is no more than 24 hours after the reader's clock: `nowMillis` (Unix
+    /// milliseconds), or the host's `Date.now()` when it is omitted.
+    /// `schemas` are expanded schemas; record references are checked for the
+    /// types among them. Returns `{ problems: string[], uncheckedTypes:
+    /// string[] }`.
+    pub fn verify(&self, schemas: JsValue, now_millis: Option<f64>) -> Result<JsValue, JsError> {
         let schemas = schema_list(schemas)?;
-        let report = bundle::verify(&self.opened, &schemas);
+        let now = match now_millis {
+            Some(millis) => time::from_unix_millis(millis as i64),
+            None => now(),
+        };
+        let report = bundle::verify_at(&self.opened, &schemas, now);
         to_js(&serde_json::json!({
             "problems": report.problems,
             "uncheckedTypes": report.unchecked_types,
@@ -343,7 +362,7 @@ impl Bundle {
     }
 
     /// Checks the manifest's signature against the keys given:
-    /// `{ pins?: [{ publisher, id, publicKey }], keySets?: [Uint8Array],
+    /// `{ pins?: [{ publisher, id, alg?, publicKey }], keySets?: [Uint8Array],
     /// expectedPublisher? }`, a key set being a publisher's keys.json as
     /// stored. Returns `{ status: "verified", publisher, key }` or
     /// `{ status: "unverified" }`. Throws an `Error` whose `message` is the
@@ -377,6 +396,30 @@ impl Bundle {
     }
 }
 
+/// Reads a pin written `<publisher>/<id>=<public_key>`, as the command
+/// line's `--pin` takes it. Returns `{ publisher, id, alg, publicKey }`, as
+/// `verifySignature` takes pins; throws with what is wrong.
+#[wasm_bindgen(js_name = parsePin)]
+pub fn parse_pin_js(text: &str) -> Result<JsValue, JsError> {
+    let pin = parse_pin_text(text).map_err(|e| JsError::new(&e))?;
+    to_js(&serde_json::json!({
+        "publisher": pin.publisher,
+        "id": pin.id,
+        "alg": pin.alg,
+        "publicKey": sign::b64url(&pin.public_key),
+    }))
+}
+
+/// Reads a key set (a publisher's keys.json, as stored) on its own, as
+/// `verifySignature` would. Returns its publisher; throws an `Error` whose
+/// `message` is the outcome code (`bad_key_set`).
+#[wasm_bindgen(js_name = checkKeySet)]
+pub fn check_key_set(bytes: &[u8]) -> Result<String, JsError> {
+    KeySet::parse(bytes)
+        .map(|set| set.publisher)
+        .map_err(code_error)
+}
+
 fn code_error(code: Code) -> JsError {
     JsError::new(code.as_str())
 }
@@ -402,18 +445,13 @@ fn trust_options(value: JsValue) -> Result<(Trust, Option<String>), JsError> {
                     .and_then(Value::as_str)
                     .ok_or_else(|| JsError::new(&format!("a pin needs a string {key}")))
             };
-            let (publisher, id) = (text("publisher")?, text("id")?);
-            let public_key: [u8; 32] = sign::from_b64url(text("publicKey")?)
-                .ok()
-                .and_then(|bytes| bytes.try_into().ok())
-                .ok_or_else(|| {
-                    JsError::new("a pin's publicKey isn't 32 bytes of base64url without padding")
-                })?;
-            trust.pins.push(Pin {
-                publisher: publisher.to_owned(),
-                id: id.to_owned(),
-                public_key,
-            });
+            let alg = match p.get("alg") {
+                None | Some(Value::Null) => "ed25519",
+                Some(_) => text("alg")?,
+            };
+            let pin = parse_pin(text("publisher")?, text("id")?, alg, text("publicKey")?)
+                .map_err(|e| JsError::new(&format!("a pin's {e}")))?;
+            trust.pins.push(pin);
         }
     }
     let sets = get("keySets")?;

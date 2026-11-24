@@ -30,7 +30,7 @@ Usage:
   legible check-compat <old> <new> [schema options]
   legible validate -s <schema>... <record.json>... [schema options]
   legible bundle pack <file|dir>... -o <bundle> [-s <schema>]... [encryption]
-  legible bundle unpack <bundle> -d <dir> [-s <schema>]... [-i <identity>]
+  legible bundle unpack <bundle> -d <dir> [-s <schema>]... [-i <identity>] [trust]
   legible bundle verify <bundle> [-s <schema>]... [-i <identity>] [trust]
   legible bundle sign <bundle> -k <key> -o <signed-bundle>
   legible keys new --publisher <domain> --id <key-id> -o <key-file>
@@ -499,6 +499,9 @@ function prompt(question) {
 }
 
 async function openBundle(file, values) {
+  if (file === "-" && (values.identity ?? []).includes("-")) {
+    throw new Failed("-i -: the bundle is already read from stdin; give the identity as a file");
+  }
   let bytes = readInput(file);
   if (startsWith(bytes, AGE_BINARY) || startsWith(bytes, AGE_ARMOR)) bytes = await decrypt(bytes, values, file);
   try {
@@ -509,7 +512,8 @@ async function openBundle(file, values) {
   }
 }
 
-/** `<publisher>/<id>=<public_key>`. */
+/** `<publisher>/<id>=<public_key>`: a quick look here, for a clear message, then the
+ * library's own check (the one the Rust tool uses), which has the final word. */
 function parsePin(text) {
   const shape = "expected <publisher>/<id>=<public_key>, such as acme.example/2026-11=<base64url>";
   const eq = text.indexOf("=");
@@ -518,7 +522,7 @@ function parsePin(text) {
   const publisher = text.slice(0, slash);
   const id = text.slice(slash + 1, eq);
   const publicKey = text.slice(eq + 1);
-  if (publisher.length > 253 || !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(publisher)) {
+  if (publisher.length > 253 || !/^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+([0-9]*[a-z]([a-z0-9-]*[a-z0-9])?|[0-9]+-[a-z0-9-]*[a-z0-9])$/.test(publisher)) {
     throw new Failed(`--pin ${text}: ${JSON.stringify(publisher)} is not a publisher: ${shape}`);
   }
   if (!/^[a-z0-9][a-z0-9.-]{0,63}$/.test(id)) {
@@ -527,18 +531,39 @@ function parsePin(text) {
   if (!/^[A-Za-z0-9_-]{43}$/.test(publicKey)) {
     throw new Failed(`--pin ${text}: the public key isn't 32 bytes of base64url without padding`);
   }
-  return { publisher, id, publicKey };
+  try {
+    return legible.parsePin(text);
+  } catch (e) {
+    throw new Failed(`--pin ${text}: ${message(e)}`);
+  }
+}
+
+/** Each --key-set file, read and checked on its own, so an error names its path. */
+function keySetsFrom(paths) {
+  const seen = new Map();
+  return paths.map((path) => {
+    const bytes = new Uint8Array(readInput(path));
+    let publisher;
+    try {
+      publisher = legible.checkKeySet(bytes);
+    } catch (e) {
+      throw new Failed(`${path}: ${message(e)}`);
+    }
+    if (seen.has(publisher)) throw new Failed(`${path}: a second key set for ${publisher} (the first is ${seen.get(publisher)})`);
+    seen.set(publisher, path);
+    return bytes;
+  });
 }
 
 /** The keys given with --pin and --key-set, as verifySignature takes them. */
 function trustFrom(values) {
   const pins = (values.pin ?? []).map(parsePin);
-  const keySets = (values["key-set"] ?? []).map((path) => new Uint8Array(readInput(path)));
+  const keySets = keySetsFrom(values["key-set"] ?? []);
   return { pins, keySets, given: pins.length + keySets.length > 0 };
 }
 
 /** The signature line `bundle verify` prints, and whether it is a problem. */
-function signatureLine(opened, trust, values) {
+function signatureLine(opened, trust) {
   try {
     if (!trust.given) {
       const by = opened.signedBy();
@@ -551,12 +576,7 @@ function signatureLine(opened, trust, values) {
       ? [`signature: verified (${result.publisher} ${result.key})`, false]
       : ["signature: unverified", false];
   } catch (e) {
-    const code = message(e);
-    // A key set that doesn't parse is a bad --key-set argument: the tool couldn't run.
-    if (code === "bad_key_set" || /^a second key set/.test(code)) {
-      throw new Failed(`--key-set ${(values["key-set"] ?? []).join(", ")}: ${code}`);
-    }
-    return [`signature: ${code}`, true];
+    return [`signature: ${message(e)}`, true];
   }
 }
 
@@ -566,7 +586,7 @@ function verify(file, opened, values) {
   const report = opened.verify(schemas);
   for (const problem of report.problems) console.log(`${file}: ${problem}`);
   for (const kind of report.uncheckedTypes) console.error(`${file}: no schema given for ${kind}; its references weren't checked`);
-  const [line, bad] = signatureLine(opened, trust, values);
+  const [line, bad] = signatureLine(opened, trust);
   console.log(line);
   if (report.problems.length || bad) throw new Problems();
 }
@@ -581,7 +601,10 @@ function unpack(opened, directory) {
   }
   if (entries.length) throw new Failed(`${directory}: not empty; unpack into a new or empty directory`);
   const root = resolve(directory);
-  const files = [["manifest.json", Buffer.from(JSON.stringify(sortKeys(opened.manifest()), null, 2) + "\n")]];
+  // The manifest and signature exactly as stored: a signature covers these bytes.
+  const files = [["manifest.json", opened.manifestBytes()]];
+  const signature = opened.signature();
+  if (signature !== undefined) files.push(["manifest.sig", signature]);
   for (const path of opened.paths()) files.push([path, opened.file(path)]);
   for (const [path, bytes] of files) {
     const target = resolve(root, path);
@@ -602,14 +625,6 @@ function unpack(opened, directory) {
       throw new Failed(`${target}: ${message(e)}`);
     }
   }
-}
-
-function sortKeys(value) {
-  if (Array.isArray(value)) return value.map(sortKeys);
-  if (value && typeof value === "object") {
-    return Object.fromEntries(Object.keys(value).sort().map((k) => [k, sortKeys(value[k])]));
-  }
-  return value;
 }
 
 // ---- Run ----

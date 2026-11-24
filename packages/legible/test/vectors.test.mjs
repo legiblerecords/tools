@@ -77,7 +77,7 @@ test("the web build loads the same module", async () => {
 });
 
 // Vectors this build doesn't pass yet; each must still fail, so the list only shrinks.
-const PENDING = ["key-unknown-alg", "pin-conflicts-with-key-set", "published-at-future", "published-at-future-of-now"];
+const PENDING = [];
 
 test("signed bundle vectors", () => {
   const dir = new URL("../../../crates/legible-records/tests/vectors/bundles/", import.meta.url);
@@ -87,10 +87,11 @@ test("signed bundle vectors", () => {
     const c = JSON.parse(readFileSync(new URL(`${name}/case.json`, dir)));
     const zip = readFileSync(new URL(`${name}/bundle.zip`, dir));
     const options = {
-      pins: c.trust.pins.map((p) => ({ publisher: p.publisher, id: p.id, publicKey: p.public_key })),
+      pins: c.trust.pins.map((p) => ({ publisher: p.publisher, id: p.id, alg: p.alg, publicKey: p.public_key })),
       keySets: c.trust.key_sets.map((s) => Buffer.from(JSON.stringify(s))),
     };
     if (c.expected_publisher) options.expectedPublisher = c.expected_publisher;
+    const now = Date.parse(c.now ?? "2026-12-01T00:00:00Z");
     let opened;
     try {
       // The zip's entry names are read first.
@@ -103,7 +104,7 @@ test("signed bundle vectors", () => {
       try {
         got = opened.verifySignature(options);
         // The signature is checked before the bundle's own checks.
-        if (opened.verify([]).problems.length) got = { error: "bad_bundle" };
+        if (opened.verify([], now).problems.length) got = { error: "bad_bundle" };
       } catch (e) {
         got = { error: e.message };
       }

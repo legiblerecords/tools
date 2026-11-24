@@ -5,8 +5,7 @@
 use serde_json::{Map, Value};
 
 use super::index::{is_feed_id, string};
-use crate::keys::Pin;
-use crate::sign::{from_b64url, is_key_id, is_publisher};
+use crate::keys::{parse_pin, Pin};
 
 /// A connection file's `$type`.
 pub const CONNECTION_TYPE: &str = "org.legiblerecords.feed-connection";
@@ -118,11 +117,23 @@ fn env(object: &Map<String, Value>, place: &str, name: &str, why: &str) -> Resul
 /// the one test for loopback, used here for plain `http` and by `net` to
 /// skip the proxy.
 pub(crate) fn is_loopback(host: &str) -> bool {
-    matches!(host, "127.0.0.1" | "[::1]" | "localhost")
+    if matches!(host, "[::1]" | "localhost") {
+        return true;
+    }
+    // 127.0.0.0/8, written as four decimal octets.
+    let octets: Vec<&str> = host.split('.').collect();
+    octets.len() == 4
+        && octets[0] == "127"
+        && octets.iter().all(|o| {
+            !o.is_empty()
+                && o.len() <= 3
+                && o.bytes().all(|c| c.is_ascii_digit())
+                && o.parse::<u8>().is_ok()
+        })
 }
 
 /// An `https` URL with a host and no userinfo. Plain `http` is allowed
-/// only for a loopback host (127.0.0.1, [::1], localhost), for local tests.
+/// only for a loopback host (127.0.0.0/8, [::1], localhost), for local tests.
 fn url(object: &Map<String, Value>, place: &str, name: &str, why: &str) -> Result<String, String> {
     let value = required(object, place, name, why)?;
     let (rest, plain) = match value.strip_prefix("https://") {
@@ -150,7 +161,7 @@ fn url(object: &Map<String, Value>, place: &str, name: &str, why: &str) -> Resul
     };
     if plain && !is_loopback(host) {
         return Err(format!(
-            "{place}.{name} must be an https:// URL (http:// is only for 127.0.0.1, [::1] or localhost)"
+            "{place}.{name} must be an https:// URL (http:// is only for a loopback host: 127.0.0.0/8, [::1] or localhost)"
         ));
     }
     Ok(value)
@@ -269,29 +280,15 @@ fn pins(value: Option<&Value>) -> Result<Vec<Pin>, String> {
         let object = key
             .as_object()
             .ok_or_else(|| format!("{place} must be an object"))?;
-        let publisher = required(object, &place, "publisher", "")?;
-        if !is_publisher(&publisher) {
-            return Err(format!("{place}.publisher {publisher:?} is not a domain"));
-        }
-        let id = required(object, &place, "id", "")?;
-        if !is_key_id(&id) {
-            return Err(format!("{place}.id {id:?} is not a key id"));
-        }
-        let alg = required(object, &place, "alg", "")?;
-        if alg != "ed25519" {
-            return Err(format!("{place}.alg {alg:?} is not ed25519"));
-        }
-        let public_key = from_b64url(&required(object, &place, "public_key", "")?)
-            .ok()
-            .and_then(|b| <[u8; 32]>::try_from(b).ok())
-            .ok_or_else(|| {
-                format!("{place}.public_key is not 32 bytes of base64url without padding")
-            })?;
-        pins.push(Pin {
-            publisher,
-            id,
-            public_key,
-        });
+        let field = |name: &str| required(object, &place, name, "");
+        let pin = parse_pin(
+            &field("publisher")?,
+            &field("id")?,
+            &field("alg")?,
+            &field("public_key")?,
+        )
+        .map_err(|e| format!("{place}.{e}"))?;
+        pins.push(pin);
     }
     Ok(pins)
 }

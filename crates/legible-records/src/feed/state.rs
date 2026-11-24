@@ -1,6 +1,11 @@
 //! Reader state (`spec/feeds.md` § Reader state): what a reader remembers
 //! between polls, in the form the vectors use, with `"$type":
 //! "legible-reader-state"` and `"version": 1` on disk.
+//!
+//! A state file written before signers were recorded has no `feed_signer`
+//! and no stream `signer`. It is still read: each missing signer is `None`,
+//! as for something unsigned, so a revocation can't clear what such an
+//! entry's key signed until the stream is next accepted.
 
 use std::collections::BTreeMap;
 
@@ -8,18 +13,29 @@ use serde_json::{json, Map, Value};
 
 use super::index::{is_sha256, is_slug, string};
 use crate::bundle::canonical_record;
-use crate::keys::{KeySet, Pin};
-use crate::sign::{b64url, from_b64url, is_key_id, is_publisher};
+use crate::keys::{parse_pin, KeySet, Pin};
+use crate::sign::{b64url, is_key_id, is_publisher};
 use crate::time;
 
 /// The state file's `$type`.
 pub const STATE_TYPE: &str = "legible-reader-state";
+
+/// Who signed something a reader accepted: the signature's `publisher` and
+/// `key`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Signer {
+    pub publisher: String,
+    pub key: String,
+}
 
 /// A stream's last accepted bundle.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamState {
     pub sha256: String,
     pub published_at: String,
+    /// Who signed it, or `None` when it was unsigned (or the state file
+    /// predates signers).
+    pub signer: Option<Signer>,
 }
 
 /// What a reader keeps about one feed.
@@ -27,6 +43,9 @@ pub struct StreamState {
 pub struct ReaderState {
     /// `updated_at` of the last accepted feed index.
     pub feed_updated_at: Option<String>,
+    /// Who signed the last accepted feed index, or `None` when it was
+    /// unsigned (or the state file predates signers).
+    pub feed_signer: Option<Signer>,
     /// Each stream's last accepted bundle.
     pub streams: BTreeMap<String, StreamState>,
     /// The last accepted key set, by its publisher.
@@ -47,26 +66,47 @@ fn approved_pin(value: &Value, index: usize) -> Result<Pin, String> {
         .as_object()
         .ok_or_else(|| format!("{place} must be an object"))?;
     let at = |e: String| format!("{place}.{e}");
-    let publisher = string(object, "publisher").map_err(at)?;
-    let id = string(object, "id").map_err(at)?;
-    if !is_publisher(publisher) || !is_key_id(id) {
-        return Err(format!("{place}: not a publisher and key id"));
+    // A state file written before approvals carried alg has none: they were
+    // all ed25519.
+    let alg = match object.get("alg") {
+        None => "ed25519",
+        Some(_) => string(object, "alg").map_err(at)?,
+    };
+    parse_pin(
+        string(object, "publisher").map_err(at)?,
+        string(object, "id").map_err(at)?,
+        alg,
+        string(object, "public_key").map_err(at)?,
+    )
+    .map_err(at)
+}
+
+/// A recorded signer: `{publisher, key}`, or `null` (or absent, in a state
+/// file that predates signers) for something unsigned.
+fn signer(object: &Map<String, Value>, name: &str) -> Result<Option<Signer>, String> {
+    match object.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Object(signer)) => {
+            let at = |e: String| format!("{name}.{e}");
+            let publisher = string(signer, "publisher").map_err(at)?;
+            let key = string(signer, "key").map_err(at)?;
+            if !is_publisher(publisher) || !is_key_id(key) || signer.len() != 2 {
+                return Err(format!("{name} must be {{publisher, key}}"));
+            }
+            Ok(Some(Signer {
+                publisher: publisher.to_owned(),
+                key: key.to_owned(),
+            }))
+        }
+        Some(_) => Err(format!("{name} must be {{publisher, key}} or null")),
     }
-    if object
-        .get("alg")
-        .is_some_and(|alg| alg.as_str() != Some("ed25519"))
-    {
-        return Err(format!("{place}.alg is not ed25519"));
+}
+
+fn signer_value(signer: &Option<Signer>) -> Value {
+    match signer {
+        Some(s) => json!({"publisher": s.publisher, "key": s.key}),
+        None => Value::Null,
     }
-    let public_key = from_b64url(string(object, "public_key").map_err(at)?)
-        .ok()
-        .and_then(|b| <[u8; 32]>::try_from(b).ok())
-        .ok_or_else(|| format!("{place}.public_key is not 32 bytes of base64url"))?;
-    Ok(Pin {
-        publisher: publisher.to_owned(),
-        id: id.to_owned(),
-        public_key,
-    })
 }
 
 impl ReaderState {
@@ -107,6 +147,7 @@ impl ReaderState {
                     StreamState {
                         sha256: sha256.to_owned(),
                         published_at: instant(stream, "published_at").map_err(at)?,
+                        signer: signer(stream, "signer").map_err(at)?,
                     },
                 );
             }
@@ -139,6 +180,7 @@ impl ReaderState {
             };
             Ok(ReaderState {
                 feed_updated_at,
+                feed_signer: signer(object, "feed_signer")?,
                 streams,
                 key_sets,
                 approved,
@@ -155,7 +197,8 @@ impl ReaderState {
             .map(|(id, s)| {
                 (
                     id.clone(),
-                    json!({"sha256": s.sha256, "published_at": s.published_at}),
+                    json!({"sha256": s.sha256, "published_at": s.published_at,
+                           "signer": signer_value(&s.signer)}),
                 )
             })
             .collect();
@@ -172,7 +215,7 @@ impl ReaderState {
             .approved
             .iter()
             .map(|p| {
-                json!({"publisher": p.publisher, "id": p.id, "alg": "ed25519",
+                json!({"publisher": p.publisher, "id": p.id, "alg": p.alg,
                        "public_key": b64url(&p.public_key)})
             })
             .collect();
@@ -180,6 +223,7 @@ impl ReaderState {
             "$type": STATE_TYPE,
             "version": 1,
             "feed_updated_at": self.feed_updated_at,
+            "feed_signer": signer_value(&self.feed_signer),
             "streams": streams,
             "key_sets": key_sets,
             "approved": approved,

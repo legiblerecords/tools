@@ -10,10 +10,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use legible_records::bundle::{pack_with, sha256_hex, Input, Limits, PackOptions};
-use legible_records::code::Code;
 use legible_records::feed::{
-    parse_connection, pull, Connection, Fetched, IndexOutcome, KeySource, NoKeySource, PullOptions,
-    PullReport, ReaderState, Source, StreamOutcome,
+    parse_connection, pull, Connection, Fetched, IndexOutcome, KeySetOutcome, KeySource,
+    NoKeySource, PullOptions, PullReport, ReaderState, Source, StreamOutcome,
 };
 use legible_records::keys::KeySet;
 use legible_records::net::{source, source_with_limits, HttpsKeySource, MAX_INDEX_BYTES};
@@ -804,29 +803,68 @@ fn key_set_unreachable_uses_cache() {
     assert_eq!(report.index, IndexOutcome::Accepted, "{report:?}");
     assert_eq!(report.streams["notes"], StreamOutcome::Accepted);
     assert!(
-        report.fetch_errors.iter().any(|e| e.contains("500")),
+        matches!(&report.key_set, KeySetOutcome::Failed(e) if e.contains("500")),
         "{:?}",
-        report.fetch_errors
+        report.key_set
     );
     // No downgrade: the held set is still the one held.
     assert_eq!(state.key_sets["acme.example"], held);
 }
 
 #[test]
-fn key_set_unreachable_no_cache_is_unknown_key() {
+fn key_set_unreachable_with_nothing_else_fails_the_poll() {
+    // A 403 or a 5xx on keys.json can't make a signing publisher look like
+    // one with no key set: with no pin, approval or held set, the poll fails.
+    let a = key_a();
+    for status in [403, 500] {
+        let feed = serve(files_handler(build_feed(
+            &[("notes", "2026-11-24T10:00:00Z")],
+            Some(&a),
+        )));
+        let keys_server = key_server(Reply::status(status), Reply::status(404));
+        let conn = https_connection(&feed, json!({"method": "none"}));
+        let mut state = ReaderState::default();
+        let mut src = source(&conn, &no_env).unwrap();
+        let mut keys = HttpsKeySource::with_base(&keys_server.origin).unwrap();
+        let report = run(&mut *src, &mut keys, &conn, Some(&mut state), None);
+        assert!(
+            matches!(&report.index, IndexOutcome::Failed(e) if e.contains("key set")),
+            "{status}: {:?}",
+            report.index
+        );
+        assert!(
+            matches!(&report.key_set, KeySetOutcome::Failed(e) if e.contains(&status.to_string())),
+            "{status}: {:?}",
+            report.key_set
+        );
+        assert!(report.streams.is_empty());
+        assert_eq!(state, ReaderState::default());
+        // The feed itself wasn't read.
+        assert_eq!(feed.count("GET", "/feed.json"), 0, "{status}");
+    }
+}
+
+#[test]
+fn key_set_unreachable_with_a_pin_checks_with_the_pin() {
     let a = key_a();
     let feed = serve(files_handler(build_feed(
         &[("notes", "2026-11-24T10:00:00Z")],
         Some(&a),
     )));
-    let keys_server = key_server(Reply::status(500), Reply::status(500));
-    let conn = https_connection(&feed, json!({"method": "none"}));
-    let mut state = ReaderState::default();
+    let keys_server = key_server(Reply::status(403), Reply::status(404));
+    let mut conn = https_connection(&feed, json!({"method": "none"}));
+    conn.pins = vec![legible_records::keys::Pin {
+        publisher: "acme.example".to_owned(),
+        id: "a".to_owned(),
+        alg: "ed25519".to_owned(),
+        public_key: a.public().key,
+    }];
     let mut src = source(&conn, &no_env).unwrap();
     let mut keys = HttpsKeySource::with_base(&keys_server.origin).unwrap();
-    let report = run(&mut *src, &mut keys, &conn, Some(&mut state), None);
-    assert_eq!(report.index, IndexOutcome::Refused(Code::UnknownKey));
-    assert_eq!(state, ReaderState::default());
+    let report = run(&mut *src, &mut keys, &conn, None, None);
+    assert_eq!(report.index, IndexOutcome::Accepted, "{report:?}");
+    assert_eq!(report.streams["notes"], StreamOutcome::Accepted);
+    assert!(matches!(report.key_set, KeySetOutcome::Failed(_)));
 }
 
 // ---- S3 ----
@@ -1010,6 +1048,7 @@ fn s3_prefix_slash_normalized() {
         conn.pins = vec![legible_records::keys::Pin {
             publisher: "acme.example".to_owned(),
             id: "a".to_owned(),
+            alg: "ed25519".to_owned(),
             public_key: a.public().key,
         }];
         let mut src = source(&conn, &env).unwrap();

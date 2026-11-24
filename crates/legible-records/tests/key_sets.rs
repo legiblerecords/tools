@@ -1,8 +1,12 @@
 //! Key set vectors and trust.
 
 use legible_records::code::Code;
-use legible_records::keys::{accept_key_set, KeySet, KeySetDecision, KeyState, Lookup, Pin, Trust};
+use legible_records::keys::{
+    decide_key_set, parse_pin, KeySet, KeySetDecision, KeyState, Lookup, Pin, Trust,
+};
 use legible_records::sign::{b64url, from_b64url};
+use legible_records::time;
+
 use serde_json::Value;
 
 fn pins(value: &Value) -> Vec<Pin> {
@@ -10,13 +14,15 @@ fn pins(value: &Value) -> Vec<Pin> {
         .as_array()
         .expect("pins")
         .iter()
-        .map(|p| Pin {
-            publisher: p["publisher"].as_str().unwrap().to_owned(),
-            id: p["id"].as_str().unwrap().to_owned(),
-            public_key: from_b64url(p["public_key"].as_str().unwrap())
-                .unwrap()
-                .try_into()
-                .unwrap(),
+        .map(|p| {
+            let field = |name: &str| p[name].as_str().unwrap();
+            parse_pin(
+                field("publisher"),
+                field("id"),
+                field("alg"),
+                field("public_key"),
+            )
+            .unwrap()
         })
         .collect()
 }
@@ -29,20 +35,12 @@ fn outcome(result: Result<KeySetDecision, Code>) -> &'static str {
     }
 }
 
+/// The reader's clock when a vector gives no `now`.
+const DEFAULT_NOW: &str = "2026-12-01T00:00:00Z";
+
 /// Vectors this reader doesn't pass yet; each must still fail, so the list
 /// only shrinks.
-const PENDING: &[&str] = &[
-    "alg-changed-unsigned",
-    "failures",
-    "pin-conflicts-with-held-set",
-    "pinned-endorser-with-held-set",
-    "same-key-two-ids",
-    "stateless-revokes-own-endorser",
-    "unheld-endorser-new-key",
-    "unheld-endorser-no-new-key",
-    "updated-at-future",
-    "updated-at-future-of-now",
-];
+const PENDING: &[&str] = &[];
 
 #[test]
 fn key_set_vectors() {
@@ -55,27 +53,20 @@ fn key_set_vectors() {
         let name = case["name"].as_str().unwrap();
         let keys_bytes = std::fs::read(path.join("keys.json")).unwrap();
         let sig = std::fs::read(path.join("keys.sig")).ok();
-        // A previous set that doesn't parse is a bad key set, as for a new one.
-        let got = match KeySet::parse(&keys_bytes) {
-            Err(code) => code.as_str(),
-            Ok(new) => {
-                let previous = if case["previous"].is_null() {
-                    Ok(None)
-                } else {
-                    let bytes = serde_json::to_vec(&case["previous"]).unwrap();
-                    KeySet::parse(&bytes).map(Some)
-                };
-                match previous {
-                    Err(code) => code.as_str(),
-                    Ok(previous) => outcome(accept_key_set(
-                        previous.as_ref(),
-                        &pins(&case["pins"]),
-                        &new,
-                        sig.as_deref(),
-                    )),
-                }
-            }
-        };
+        let now = time::parse(case["now"].as_str().unwrap_or(DEFAULT_NOW)).unwrap();
+        let previous = (!case["previous"].is_null()).then(|| {
+            KeySet::parse(&serde_json::to_vec(&case["previous"]).unwrap()).expect("previous")
+        });
+        // The key set is taken to be fetched from the domain it names.
+        let verdict = decide_key_set(
+            previous.as_ref(),
+            &pins(&case["pins"]),
+            &keys_bytes,
+            sig.as_deref(),
+            now,
+            None,
+        );
+        let got = outcome(verdict.outcome);
         let expect = case["expect"].as_str().unwrap();
         match (got == expect, PENDING.contains(&name)) {
             (false, false) => failures.push(format!("{name}: expected {expect}, got {got}")),
@@ -91,12 +82,13 @@ fn key_set_vectors() {
 const SET: &str = r#"{"$type":"org.legiblerecords.keys","version":1,"publisher":"acme.example","updated_at":"2026-11-24T00:00:00Z","keys":[
   {"id":"2025-06","alg":"ed25519","public_key":"Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc","created_at":"2025-06-01T00:00:00Z","revoked_at":"2026-06-01T00:00:00Z"},
   {"id":"2026-11","alg":"ed25519","public_key":"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg","created_at":"2026-11-24T00:00:00Z"},
-  {"id":"2030-01","alg":"ed448","public_key":"short","created_at":"2026-11-24T00:00:00Z"}]}"#;
+  {"id":"2030-01","alg":"ed448","public_key":"zRSzf5VulTGU_3-3Oz2B3MVh1hp1OAlLfD4aZD7l86o","created_at":"2026-11-24T00:00:00Z"}]}"#;
 
 fn pin(id: &str, key: &str) -> Pin {
     Pin {
         publisher: "acme.example".to_owned(),
         id: id.to_owned(),
+        alg: "ed25519".to_owned(),
         public_key: from_b64url(key).unwrap().try_into().unwrap(),
     }
 }
@@ -124,7 +116,7 @@ fn revoked_in_key_set_overrides_pin() {
                 "Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc"
             );
         }
-        Lookup::Unknown => panic!("pinned key is known"),
+        other => panic!("pinned key is known: {other:?}"),
     }
     // A pin under another id for the same revoked key is revoked too.
     trust
@@ -160,7 +152,7 @@ fn unknown_alg_keys_are_not_trusted() {
         "acme.example".to_owned(),
         KeySet::parse(SET.as_bytes()).unwrap(),
     );
-    assert_eq!(trust.lookup("acme.example", "2030-01"), Lookup::Unknown);
+    assert_eq!(trust.lookup("acme.example", "2030-01"), Lookup::UnknownAlg);
     assert!(matches!(
         trust.lookup("acme.example", "2026-11"),
         Lookup::Found(_, KeyState::Active)
@@ -182,4 +174,64 @@ fn parse_refuses_what_is_not_a_key_set() {
             "{bad}"
         );
     }
+}
+
+#[test]
+fn endorsement_in_another_context_is_bad() {
+    use legible_records::sign::{sign, Context, SigningKey};
+    // Test-only seed.
+    let key = SigningKey::from_seed("acme.example", "2026-11", [7; 32]).unwrap();
+    let public = b64url(&key.public().key);
+    let set = format!(
+        r#"{{"$type":"org.legiblerecords.keys","version":1,"publisher":"acme.example","updated_at":"2026-11-24T00:00:00Z","keys":[{{"id":"2026-11","alg":"ed25519","public_key":"{public}","created_at":"2026-11-24T00:00:00Z"}},{{"id":"next","alg":"ed25519","public_key":"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg","created_at":"2026-11-24T00:00:00Z"}}]}}"#
+    );
+    let anchors = [pin("2026-11", &public)];
+    let now = time::parse("2026-12-01T00:00:00Z").unwrap();
+    for (context, expect) in [
+        (Context::Manifest, Err(Code::BadEndorsement)),
+        (Context::Feed, Err(Code::BadEndorsement)),
+        (Context::Keys, Ok(KeySetDecision::Accepted)),
+    ] {
+        let sig = sign(&key, context, set.as_bytes()).to_bytes();
+        let verdict = decide_key_set(None, &anchors, set.as_bytes(), Some(&sig), now, None);
+        assert_eq!(verdict.outcome, expect, "{context:?}");
+    }
+}
+
+#[test]
+fn served_set_must_name_its_domain_and_not_run_ahead() {
+    let now = time::parse("2026-11-24T00:00:00Z").unwrap();
+    let verdict = decide_key_set(None, &[], SET.as_bytes(), None, now, Some("other.example"));
+    assert_eq!(verdict.outcome, Err(Code::BadKeySet));
+    assert!(verdict.set.is_none());
+    let early = time::parse("2026-11-22T23:59:59Z").unwrap();
+    let verdict = decide_key_set(None, &[], SET.as_bytes(), None, early, Some("acme.example"));
+    assert_eq!(verdict.outcome, Err(Code::BadKeySet));
+}
+
+#[test]
+fn pins_parse_in_one_place() {
+    use legible_records::keys::parse_pin_text;
+    let good = "acme.example/2026-11=A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg";
+    let pin = parse_pin_text(good).unwrap();
+    assert_eq!(
+        (pin.publisher.as_str(), pin.id.as_str(), pin.alg.as_str()),
+        ("acme.example", "2026-11", "ed25519")
+    );
+    for bad in [
+        "acme.example/2026-11",
+        "acme.example=A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+        "10.0.0.1/k=A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+        // Not canonical: the last character's unused bits aren't zero.
+        "acme.example/k=A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbh",
+    ] {
+        assert!(parse_pin_text(bad).is_err(), "{bad}");
+    }
+    assert!(parse_pin(
+        "acme.example",
+        "k",
+        "ml-dsa-44",
+        "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg"
+    )
+    .is_err());
 }

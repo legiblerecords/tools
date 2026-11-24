@@ -21,7 +21,7 @@ fn context(name: &str) -> Context {
 
 /// Vectors this reader doesn't pass yet; each must still fail, so the list
 /// only shrinks.
-const PENDING: &[&str] = &["unknown-alg-other-length"];
+const PENDING: &[&str] = &[];
 
 #[test]
 fn signature_vectors() {
@@ -110,6 +110,21 @@ fn signs_and_verifies() {
 }
 
 #[test]
+fn signature_file_checks_alg_before_the_signature_length() {
+    let sig = b64url(&[0u8; 100]);
+    let file = format!(r#"{{"alg":"rsa","publisher":"a.example","key":"k","signature":"{sig}"}}"#);
+    assert_eq!(
+        SignatureFile::parse(file.as_bytes()).unwrap_err(),
+        Code::UnknownAlg
+    );
+    let file = file.replace("rsa", "ed25519");
+    assert_eq!(
+        SignatureFile::parse(file.as_bytes()).unwrap_err(),
+        Code::BadSignatureFile
+    );
+}
+
+#[test]
 fn signature_file_shape() {
     let bad = |s: &str| SignatureFile::parse(s.as_bytes()).unwrap_err();
     assert_eq!(bad("not json"), Code::BadSignatureFile);
@@ -152,6 +167,12 @@ fn rejects_non_domain_publishers() {
     ] {
         assert!(!is_publisher(bad), "{bad:?}");
     }
+    // An IP address is not a publisher: the last label can't be all digits.
+    for ip in ["10.0.0.1", "127.0.0.1", "a.123"] {
+        assert!(!is_publisher(ip), "{ip}");
+    }
+    assert!(is_publisher("1.2-3"));
+    assert!(is_publisher("123.example"));
     assert!(is_publisher("acme.example"));
     assert!(is_publisher("a-b.co.uk"));
     let long = format!(

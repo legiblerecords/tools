@@ -241,3 +241,52 @@ test("keys new refuses overwrite", () => {
   assert.equal(stdout.status, 2);
   assert.equal(stdout.stdout, "");
 });
+
+test("unpack keeps a signed bundle's manifest and signature as stored; --key-set errors name the file", async () => {
+  const { createRequire } = await import("node:module");
+  const legible = createRequire(import.meta.url)("../dist/legible_records_wasm.cjs");
+  const dir = workspace();
+  packPlain(dir);
+  const made = run(dir, ["keys", "new", "--publisher", "acme.example", "--id", "2026-11", "-o", "key.json"]);
+  const entry = JSON.parse(made.stdout);
+  assert.equal(run(dir, ["bundle", "sign", "b.zip", "-k", "key.json", "-o", "s.zip"]).status, 0);
+  const pin = `acme.example/2026-11=${entry.public_key}`;
+
+  const unpacked = run(dir, ["bundle", "unpack", "s.zip", "-d", "out", "--pin", pin]);
+  assert.equal(unpacked.status, 0, unpacked.stderr);
+  const opened = legible.Bundle.open(readFileSync(join(dir, "s.zip")));
+  try {
+    assert.deepEqual(new Uint8Array(readFileSync(join(dir, "out", "manifest.json"))), opened.manifestBytes());
+    assert.deepEqual(new Uint8Array(readFileSync(join(dir, "out", "manifest.sig"))), opened.signature());
+  } finally {
+    opened.free();
+  }
+  // What was unpacked verifies again once packed by the Rust tool's rules: the signature
+  // covers the manifest's stored bytes, which unpack kept.
+  assert.ok(readdirSync(join(dir, "out")).includes("manifest.sig"));
+
+  // A key set that isn't one: exit 2, naming that file and no other.
+  writeFileSync(join(dir, "good.json"), JSON.stringify({ $type: "org.legiblerecords.keys", version: 1, publisher: "acme.example", updated_at: entry.created_at, keys: [entry] }));
+  writeFileSync(join(dir, "bad.json"), "{ not json");
+  const bad = run(dir, ["bundle", "verify", "s.zip", "--key-set", "good.json", "--key-set", "bad.json"]);
+  assert.equal(bad.status, 2);
+  assert.match(bad.stderr, /bad\.json: bad_key_set/);
+  assert.doesNotMatch(bad.stderr, /good\.json/);
+  assert.equal(bad.stdout, "");
+
+  // A pin and a key set together that agree: verified. One that disagrees with the set: unknown_key.
+  const both = run(dir, ["bundle", "verify", "s.zip", "--pin", pin, "--key-set", "good.json"]);
+  assert.equal(both.status, 0, both.stdout + both.stderr);
+  assert.match(both.stdout, /^signature: verified \(acme\.example 2026-11\)$/m);
+  const other = JSON.parse(run(dir, ["keys", "new", "--publisher", "acme.example", "--id", "x", "-o", "other.json"]).stdout);
+  const clash = run(dir, ["bundle", "verify", "s.zip", "--pin", `acme.example/2026-11=${other.public_key}`, "--key-set", "good.json"]);
+  assert.equal(clash.status, 1);
+  assert.match(clash.stdout, /^signature: unknown_key$/m);
+
+  // An IP address is not a publisher.
+  assert.equal(run(dir, ["bundle", "verify", "s.zip", "--pin", `10.0.0.1/k=${entry.public_key}`]).status, 2);
+  // The bundle and the identity can't both come from stdin.
+  const stdin = run(dir, ["bundle", "verify", "-", "-i", "-"]);
+  assert.equal(stdin.status, 2);
+  assert.match(stdin.stderr, /-i -/);
+});

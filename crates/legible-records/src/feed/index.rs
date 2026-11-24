@@ -45,10 +45,12 @@ pub fn is_slug(s: &str) -> bool {
         })
 }
 
-/// Whether `s` is a feed id, `<publisher>/<slug>`.
+/// Whether `s` is a feed id, `<publisher>/<slug>` (`common.feedId`), of at
+/// most 317 characters.
 pub fn is_feed_id(s: &str) -> bool {
-    s.split_once('/')
-        .is_some_and(|(publisher, slug)| is_publisher(publisher) && is_slug(slug))
+    s.len() <= 317
+        && s.split_once('/')
+            .is_some_and(|(publisher, slug)| is_publisher(publisher) && is_slug(slug))
 }
 
 /// Whether `s` is a SHA-256 as lowercase hex.

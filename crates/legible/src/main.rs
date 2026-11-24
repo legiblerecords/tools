@@ -8,7 +8,7 @@ use std::process::ExitCode;
 use clap::{Args, Parser, Subcommand};
 use legible_records::bundle::{self, Input, Limits, SignatureStatus};
 use legible_records::code::Code;
-use legible_records::keys::{KeySet, Pin, Trust};
+use legible_records::keys::{parse_pin_text, KeySet, Trust};
 use legible_records::short_form::{self, Options};
 use legible_records::sign::{self, Context, SignatureFile, SigningKey};
 use legible_records::validate::Schemas;
@@ -126,7 +126,8 @@ impl TrustArgs {
     fn trust(&self) -> Result<Trust, Stop> {
         let mut trust = Trust::default();
         for text in &self.pins {
-            let pin = parse_pin(text).map_err(|e| Stop::Failed(format!("--pin {text}: {e}")))?;
+            let pin =
+                parse_pin_text(text).map_err(|e| Stop::Failed(format!("--pin {text}: {e}")))?;
             trust.pins.push(pin);
         }
         for path in &self.key_sets {
@@ -147,28 +148,6 @@ impl TrustArgs {
     fn given(&self) -> bool {
         !self.pins.is_empty() || !self.key_sets.is_empty()
     }
-}
-
-/// `<publisher>/<id>=<public_key>`.
-fn parse_pin(text: &str) -> Result<Pin, String> {
-    let shape = "expected <publisher>/<id>=<public_key>, such as acme.example/2026-11=<base64url>";
-    let (name, key) = text.split_once('=').ok_or(shape)?;
-    let (publisher, id) = name.split_once('/').ok_or(shape)?;
-    if !sign::is_publisher(publisher) {
-        return Err(format!("{publisher:?} is not a publisher: {shape}"));
-    }
-    if !sign::is_key_id(id) {
-        return Err(format!("{id:?} is not a key id: {shape}"));
-    }
-    let public_key: [u8; 32] = sign::from_b64url(key)
-        .ok()
-        .and_then(|bytes| bytes.try_into().ok())
-        .ok_or("the public key isn't 32 bytes of base64url without padding")?;
-    Ok(Pin {
-        publisher: publisher.to_owned(),
-        id: id.to_owned(),
-        public_key,
-    })
 }
 
 #[derive(Subcommand)]
@@ -567,6 +546,12 @@ fn write_output(path: &Path, bytes: &[u8]) -> Result<(), Stop> {
 }
 
 fn open_bundle(path: &Path, identity: Option<&Path>) -> Result<bundle::Opened, Stop> {
+    let stdin = Path::new("-");
+    if path == stdin && identity == Some(stdin) {
+        return Err(Stop::Failed(
+            "-i -: the bundle is already read from stdin; give the identity as a file".to_owned(),
+        ));
+    }
     let mut bytes = read_input(path)?;
     if legible_records::age::is_encrypted(&bytes) {
         let Some(identity) = identity else {
@@ -606,7 +591,7 @@ fn verify_bundle(
 ) -> Result<(), Stop> {
     let bodies = load_schemas(schemas, args)?;
     let trust = trust_args.trust()?;
-    let report = bundle::verify(opened, &bodies);
+    let report = bundle::verify_at(opened, &bodies, legible_records::time::now());
     for problem in &report.problems {
         println!("{}: {problem}", path.display());
     }
@@ -713,6 +698,19 @@ fn run_keys(command: KeysCommand) -> Result<(), Stop> {
                     set.publisher,
                     key.publisher
                 )));
+            }
+            let public = key.public().key;
+            if !set
+                .keys
+                .iter()
+                .any(|k| k.id == key.id && k.public_key == public)
+            {
+                eprintln!(
+                    "warning: {}: {}/{} isn't in this key set; readers only take an endorsement from a key they already hold",
+                    keys.display(),
+                    key.publisher,
+                    key.id
+                );
             }
             let signature = sign::sign(&key, Context::Keys, &bytes);
             write_output(&output, &signature.to_bytes())

@@ -529,6 +529,7 @@ mod feed_publish {
             pin: Pin {
                 publisher: "acme.example".to_owned(),
                 id: "2026-11".to_owned(),
+                alg: "ed25519".to_owned(),
                 public_key: public,
             },
         }

@@ -389,14 +389,17 @@ pub fn check_signature(
 }
 
 /// Checks a signature file (`manifest.sig` or `feed.sig`) over `message`
-/// against what the reader trusts, in this order: the signature file parses
-/// and its `alg` is known; its publisher is `expected_publisher`, when given;
-/// its key is known and not revoked (at any date: a revoked key's signatures
-/// never verify); the signature verifies. A retired key still verifies.
+/// against what the reader trusts, in the order of records.md § Reading a
+/// signed bundle: the signature file (`bad_signature_file`), its `alg`
+/// (`unknown_alg`), its signature's encoding (`bad_signature_file`); its
+/// publisher is `expected_publisher`, when given (`publisher_mismatch`); its
+/// key, as [`Trust::lookup`] finds it (`unknown_key`, `revoked_key` at any
+/// date, `unknown_alg`); then the signature (`bad_signature`). A retired key
+/// still verifies.
 ///
 /// No signature is [`SignatureStatus::Unverified`], unless the reader
-/// trusts a key of `expected_publisher`, pinned or approved or from a key
-/// set it holds: then it is `unsigned_from_pinned_publisher`.
+/// trusts `expected_publisher` ([`Trust::trusts_publisher`]): then it is
+/// `unsigned_from_pinned_publisher`.
 pub fn check_signed(
     signature: Option<&[u8]>,
     context: Context,
@@ -412,12 +415,15 @@ pub fn check_signed(
             _ => Ok(SignatureStatus::Unverified),
         };
     };
+    // The file, its alg, then its signature's encoding.
     let file = SignatureFile::parse(bytes)?;
     if expected_publisher.is_some_and(|publisher| publisher != file.publisher) {
         return Err(Code::PublisherMismatch);
     }
-    let Lookup::Found(key, state) = trust.lookup(&file.publisher, &file.key) else {
-        return Err(Code::UnknownKey);
+    let (key, state) = match trust.lookup(&file.publisher, &file.key) {
+        Lookup::Found(key, state) => (key, state),
+        Lookup::Unknown => return Err(Code::UnknownKey),
+        Lookup::UnknownAlg => return Err(Code::UnknownAlg),
     };
     if state == KeyState::Revoked {
         return Err(Code::RevokedKey);
@@ -472,9 +478,6 @@ pub fn open(zip: &[u8], limits: Limits) -> Result<Opened, Vec<String>> {
                 continue;
             }
         };
-        if entry.is_dir() {
-            continue;
-        }
         let path = match entry.name() {
             Ok(name) => name.into_owned(),
             Err(e) => {
@@ -482,8 +485,17 @@ pub fn open(zip: &[u8], limits: Limits) -> Result<Opened, Vec<String>> {
                 continue;
             }
         };
-        if !is_safe_path(&path) {
+        // A directory's name is checked as well, and then it is skipped.
+        let checked = if entry.is_dir() {
+            path.strip_suffix('/').unwrap_or(&path)
+        } else {
+            path.as_str()
+        };
+        if !is_safe_path(checked) {
             problems.push(format!("{path}: not a safe path inside a bundle"));
+            continue;
+        }
+        if entry.is_dir() {
             continue;
         }
         let remaining = limits.max_total_bytes.saturating_sub(total);
@@ -528,6 +540,26 @@ pub fn open(zip: &[u8], limits: Limits) -> Result<Opened, Vec<String>> {
     }
 }
 
+/// [`verify`], and also that the manifest's `published_at`, when it has
+/// one, is no more than 24 hours after the reader's clock `now`
+/// (records.md § Bundles). A reader passes its own clock.
+pub fn verify_at(bundle: &Opened, schemas: &[Value], now: crate::time::Instant) -> Report {
+    let mut report = verify(bundle, schemas);
+    if let Some(Ok(at)) = bundle
+        .manifest
+        .get("published_at")
+        .and_then(Value::as_str)
+        .map(crate::time::parse)
+    {
+        if crate::keys::too_far_ahead(at, now) {
+            report.problems.push(format!(
+                "{MANIFEST}: published_at is more than 24 hours after this reader's clock"
+            ));
+        }
+    }
+    report
+}
+
 /// Checks an opened bundle: the manifest's type, every hash, that the
 /// manifest lists exactly the files present, that each record's type
 /// matches its listing, and that references resolve. Record references are
@@ -538,6 +570,13 @@ pub fn verify(bundle: &Opened, schemas: &[Value]) -> Report {
     let mut report = Report::default();
     let problems = &mut report.problems;
     let manifest = &bundle.manifest;
+    match manifest.get("published_at") {
+        None => {}
+        Some(Value::String(text)) if crate::time::parse(text).is_ok() => {}
+        Some(_) => problems.push(format!(
+            "{MANIFEST}: published_at is not an RFC 3339 date-time"
+        )),
+    }
     if manifest.get("$type") != Some(&json!(BUNDLE_TYPE))
         || manifest.get("version") != Some(&json!(1))
     {

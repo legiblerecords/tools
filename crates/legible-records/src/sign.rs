@@ -142,8 +142,10 @@ pub struct SignatureFile {
 }
 
 impl SignatureFile {
-    /// Reads a signature file. A file that isn't the JSON the spec defines is
-    /// `bad_signature_file`; another algorithm is `unknown_alg`.
+    /// Reads a signature file, in the spec's order: a file that isn't JSON
+    /// with the four string members is `bad_signature_file`; then another
+    /// algorithm is `unknown_alg`; then a `signature` that isn't canonical
+    /// base64url of 64 bytes is `bad_signature_file`.
     pub fn parse(bytes: &[u8]) -> Result<SignatureFile, Code> {
         let value: Value = serde_json::from_slice(bytes).map_err(|_| Code::BadSignatureFile)?;
         let object = value.as_object().ok_or(Code::BadSignatureFile)?;
@@ -160,12 +162,15 @@ impl SignatureFile {
         let alg = text("alg")?;
         let publisher = text("publisher")?;
         let key = text("key")?;
-        let signature = from_b64url(&text("signature")?).map_err(|_| Code::BadSignatureFile)?;
-        if signature.len() != 64 {
-            return Err(Code::BadSignatureFile);
-        }
+        let signature = text("signature")?;
+        // alg before the signature is decoded: another algorithm's signature
+        // can have another length.
         if alg != "ed25519" {
             return Err(Code::UnknownAlg);
+        }
+        let signature = from_b64url(&signature).map_err(|_| Code::BadSignatureFile)?;
+        if signature.len() != 64 {
+            return Err(Code::BadSignatureFile);
         }
         Ok(SignatureFile {
             alg,
@@ -234,13 +239,17 @@ pub fn verify(
         .map_err(|_| Code::BadSignature)
 }
 
-/// Whether `s` is a publisher: what `common.domain` accepts, which is
-/// `^(?=.{1,253}$)[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`.
+/// Whether `s` is a publisher: what `common.domain` accepts. That is a
+/// lowercase domain of two or more labels, each of letters, digits and
+/// hyphens and neither starting nor ending with a hyphen, whose last label
+/// isn't all digits (so an IP address is not a publisher), of at most 253
+/// characters.
 pub fn is_publisher(s: &str) -> bool {
     if s.is_empty() || s.len() > 253 {
         return false;
     }
     let mut labels = 0;
+    let mut last_all_digits = false;
     for label in s.split('.') {
         let b = label.as_bytes();
         let edge = |c: u8| c.is_ascii_lowercase() || c.is_ascii_digit();
@@ -251,9 +260,10 @@ pub fn is_publisher(s: &str) -> bool {
         if !ok {
             return false;
         }
+        last_all_digits = b.iter().all(u8::is_ascii_digit);
         labels += 1;
     }
-    labels >= 2
+    labels >= 2 && !last_all_digits
 }
 
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
