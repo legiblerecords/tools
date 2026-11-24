@@ -547,6 +547,7 @@ fn build_feed(
             published_at: Some(stream.published_at.to_owned()),
             feed: Some(("acme.example/track".to_owned(), stream.id.to_owned())),
             signer: stream.signer,
+            ..PackOptions::default()
         };
         let zip = pack_with(&inputs, &[], &options).unwrap().zip;
         let sha = sha256_hex(&zip);

@@ -103,6 +103,22 @@ pub struct PackOptions<'a> {
     pub feed: Option<(String, String)>,
     /// Signs the manifest, writing `manifest.sig`.
     pub signer: Option<&'a SigningKey>,
+    /// Which kinds become record sets (spec/records.md § Record sets).
+    pub sets: SetMode,
+}
+
+/// Which kinds [`pack_with`] writes as record sets. `.ndjson` inputs are
+/// always kept as the record sets they are.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum SetMode {
+    /// A kind with more than [`crate::record_set::SET_THRESHOLD`] records of
+    /// one version.
+    #[default]
+    Auto,
+    /// No kind, other than `.ndjson` inputs.
+    Never,
+    /// These kinds, whatever their size.
+    Kinds(Vec<String>),
 }
 
 /// What [`check_signature`] found.
@@ -233,7 +249,36 @@ pub fn pack_with(
     let mut problems = Vec::new();
     let mut files: BTreeMap<String, (Vec<u8>, Map<String, Value>)> = BTreeMap::new();
     let mut attachments = Vec::new();
+    // Per kind and version, the records not given as a set: (key, record, input name).
+    let mut loose: Loose = BTreeMap::new();
+    let mut kind_types: BTreeMap<String, String> = BTreeMap::new();
+    let mut given_sets: BTreeSet<String> = BTreeSet::new();
+    let mut keys: BTreeSet<(String, String)> = BTreeSet::new();
     for input in inputs {
+        if input.name.to_ascii_lowercase().ends_with(".ndjson") {
+            match pack_record_set(input, schemas) {
+                Ok(GivenSet {
+                    kind,
+                    path,
+                    bytes,
+                    entry,
+                    ids,
+                }) => {
+                    if !given_sets.insert(kind.clone()) {
+                        problems.push(format!("{}: a second record set for {kind}", input.name));
+                        continue;
+                    }
+                    for id in ids {
+                        if !keys.insert((kind.clone(), id.clone())) {
+                            problems.push(format!("{}: {kind}:{id} appears twice", input.name));
+                        }
+                    }
+                    files.insert(path, (bytes, entry));
+                }
+                Err(mut found) => problems.append(&mut found),
+            }
+            continue;
+        }
         let record = input
             .name
             .to_ascii_lowercase()
@@ -263,14 +308,13 @@ pub fn pack_with(
                 ));
                 continue;
             }
-            let path = format!("records/{kind}/{key}.json");
-            let bytes = canonical_record(&record);
-            let mut entry = Map::new();
-            entry.insert("record_type".to_owned(), json!(kind_id));
-            entry.insert("record_version".to_owned(), json!(version));
-            if files.insert(path.clone(), (bytes, entry)).is_some() {
-                problems.push(format!("{}: two records would both be {path}", input.name));
-            }
+            kind_types.insert(kind.clone(), kind_id.to_owned());
+            loose
+                .entry(kind)
+                .or_default()
+                .entry(version)
+                .or_default()
+                .push((key, record.clone(), input.name.clone()));
         } else {
             let sha = sha256_hex(&input.bytes);
             let name = input
@@ -288,6 +332,51 @@ pub fn pack_with(
                 name,
                 media_type: media,
             });
+        }
+    }
+    for (kind, versions) in loose {
+        let record_type = &kind_types[&kind];
+        // The version with the most records may become the kind's set.
+        let set_version = versions
+            .iter()
+            .max_by_key(|(version, records)| (records.len(), **version))
+            .map(|(version, records)| (*version, records.len()))
+            .filter(|(_, count)| match &options.sets {
+                SetMode::Auto => *count > crate::record_set::SET_THRESHOLD,
+                SetMode::Never => false,
+                SetMode::Kinds(kinds) => kinds.contains(&kind),
+            })
+            .filter(|_| !given_sets.contains(&kind))
+            .map(|(version, _)| version);
+        for (version, records) in versions {
+            for (key, _, name) in &records {
+                if !keys.insert((kind.clone(), key.clone())) {
+                    problems.push(format!("{name}: {kind}:{key} appears twice"));
+                }
+            }
+            if Some(version) == set_version {
+                let values: Vec<Value> = records.into_iter().map(|(_, record, _)| record).collect();
+                match crate::record_set::write(&values) {
+                    Ok(bytes) => {
+                        let mut entry = Map::new();
+                        entry.insert("record_type".to_owned(), json!(record_type));
+                        entry.insert("record_version".to_owned(), json!(version));
+                        entry.insert("count".to_owned(), json!(values.len()));
+                        files.insert(crate::record_set::set_path(&kind), (bytes, entry));
+                    }
+                    Err(e) => problems.push(format!("{kind}: {e}")),
+                }
+                continue;
+            }
+            for (key, record, _) in records {
+                let mut entry = Map::new();
+                entry.insert("record_type".to_owned(), json!(record_type));
+                entry.insert("record_version".to_owned(), json!(version));
+                files.insert(
+                    format!("records/{kind}/{key}.json"),
+                    (canonical_record(&record), entry),
+                );
+            }
         }
     }
     if !problems.is_empty() {
@@ -326,6 +415,64 @@ pub fn pack_with(
         zip,
         manifest,
         attachments,
+    })
+}
+
+/// Records not given as a set, per kind and version: (key, record, input name).
+type Loose = BTreeMap<String, BTreeMap<u64, Vec<(String, Value, String)>>>;
+
+/// An `.ndjson` input once its lines check out.
+struct GivenSet {
+    kind: String,
+    path: String,
+    bytes: Vec<u8>,
+    entry: Map<String, Value>,
+    ids: Vec<String>,
+}
+
+/// An `.ndjson` input as a record set.
+fn pack_record_set(input: &Input, schemas: &[Value]) -> Result<GivenSet, Vec<String>> {
+    let name = &input.name;
+    let first = input
+        .bytes
+        .split(|b| *b == b'\n')
+        .next()
+        .unwrap_or_default();
+    let first: Value = serde_json::from_slice(first)
+        .map_err(|e| vec![format!("{name}: line 1: not JSON: {e}")])?;
+    let (record_type, version) = record_type(&first)
+        .map(|(t, v)| (t.to_owned(), v))
+        .ok_or_else(|| vec![format!("{name}: line 1: no $type and version")])?;
+    let kind = kind_of(schemas, &record_type, version);
+    let sha = sha256_hex(&input.bytes);
+    let count = input.bytes.iter().filter(|b| **b == b'\n').count() as u64;
+    let expect = crate::record_set::Expect {
+        record_type: &record_type,
+        record_version: version,
+        count,
+        sha256: &sha,
+    };
+    let records = crate::record_set::check(&input.bytes, expect).map_err(|found| {
+        found
+            .into_iter()
+            .map(|p| format!("{name}: {p}"))
+            .collect::<Vec<_>>()
+    })?;
+    let ids = records
+        .iter()
+        .filter_map(|r| r.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect();
+    let mut entry = Map::new();
+    entry.insert("record_type".to_owned(), json!(record_type));
+    entry.insert("record_version".to_owned(), json!(version));
+    entry.insert("count".to_owned(), json!(count));
+    let path = crate::record_set::set_path(&kind);
+    Ok(GivenSet {
+        kind,
+        path,
+        bytes: input.bytes.clone(),
+        entry,
+        ids,
     })
 }
 
@@ -597,7 +744,14 @@ pub fn verify(bundle: &Opened, schemas: &[Value]) -> Report {
         return report;
     };
     let mut seen = BTreeSet::new();
-    let mut records: BTreeMap<String, Value> = BTreeMap::new();
+    // Each record with where it came from, and every kind:key in the bundle.
+    let mut records: Vec<(String, Value)> = Vec::new();
+    let mut keys: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut add_key = |problems: &mut Vec<String>, kind: &str, key: &str, path: &str| {
+        if !keys.insert((kind.to_owned(), key.to_owned())) {
+            problems.push(format!("{path}: {kind}:{key} appears twice in the bundle"));
+        }
+    };
     for entry in listed {
         let (Some(path), Some(sha)) = (
             entry.get("path").and_then(Value::as_str),
@@ -615,6 +769,47 @@ pub fn verify(bundle: &Opened, schemas: &[Value]) -> Report {
         };
         if sha256_hex(bytes) != sha {
             problems.push(format!("{path}: SHA-256 doesn't match the manifest"));
+        }
+        let is_set = path.starts_with("records/") && path.ends_with(".ndjson");
+        if entry.get("count").is_some() && !is_set {
+            problems.push(format!("{path}: count is only for a record set"));
+        }
+        if is_set {
+            let (Some(kind_id), Some(version), Some(count)) = (
+                entry.get("record_type").and_then(Value::as_str),
+                entry.get("record_version").and_then(Value::as_u64),
+                entry.get("count").and_then(Value::as_u64),
+            ) else {
+                problems.push(format!(
+                    "{path}: a record set's entry needs record_type, record_version and count"
+                ));
+                continue;
+            };
+            let kind = kind_of(schemas, kind_id, version);
+            if crate::record_set::kind_of_path(path) != Some(kind.as_str()) {
+                problems.push(format!(
+                    "{path}: a {kind_id} record set belongs at {}",
+                    crate::record_set::set_path(&kind)
+                ));
+                continue;
+            }
+            let expect = crate::record_set::Expect {
+                record_type: kind_id,
+                record_version: version,
+                count,
+                sha256: sha,
+            };
+            match crate::record_set::check(bytes, expect) {
+                Ok(set) => {
+                    for record in set {
+                        let id = record["id"].as_str().unwrap_or_default().to_owned();
+                        add_key(problems, &kind, &id, path);
+                        records.push((format!("{path} ({kind}:{id})"), record));
+                    }
+                }
+                Err(found) => problems.extend(found.into_iter().map(|p| format!("{path}: {p}"))),
+            }
+            continue;
         }
         if let Some(kind) = entry.get("record_type").and_then(Value::as_str) {
             match serde_json::from_slice::<Value>(bytes) {
@@ -641,8 +836,14 @@ pub fn verify(bundle: &Opened, schemas: &[Value]) -> Report {
                         problems.push(format!(
                             "{path}: a {kind} record belongs at records/{folder}/<id>.json"
                         ));
+                    } else if let Some((found, key)) = path
+                        .strip_prefix("records/")
+                        .and_then(|rest| rest.strip_suffix(".json"))
+                        .and_then(|rest| rest.split_once('/'))
+                    {
+                        add_key(problems, found, key, path);
                     }
-                    records.insert(path.to_owned(), record);
+                    records.push((path.to_owned(), record));
                 }
                 Err(e) => problems.push(format!("{path}: not JSON: {e}")),
             }
@@ -653,14 +854,6 @@ pub fn verify(bundle: &Opened, schemas: &[Value]) -> Report {
             problems.push(format!("{path}: present but not listed in {MANIFEST}"));
         }
     }
-    let keys: BTreeSet<(String, String)> = records
-        .keys()
-        .filter_map(|path| {
-            let rest = path.strip_prefix("records/")?.strip_suffix(".json")?;
-            let (kind, key) = rest.split_once('/')?;
-            Some((kind.to_owned(), key.to_owned()))
-        })
-        .collect();
     let mut unchecked = BTreeSet::new();
     for (path, record) in &records {
         let mut found = Vec::new();

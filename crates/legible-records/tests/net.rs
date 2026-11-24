@@ -182,6 +182,7 @@ fn build_feed(streams: &[(&str, &str)], signer: Option<&SigningKey>) -> BTreeMap
             published_at: Some((*published_at).to_owned()),
             feed: Some(("acme.example/track".to_owned(), (*id).to_owned())),
             signer,
+            ..PackOptions::default()
         };
         let zip = pack_with(&inputs, &[], &options).unwrap().zip;
         let sha = sha256_hex(&zip);

@@ -116,6 +116,7 @@ fn options(signer: Option<&SigningKey>) -> PackOptions<'_> {
         published_at: Some("2026-11-24T10:00:00Z".to_owned()),
         feed: Some(("acme.example/controls".to_owned(), "main".to_owned())),
         signer,
+        ..PackOptions::default()
     }
 }
 
