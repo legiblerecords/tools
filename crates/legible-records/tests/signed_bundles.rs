@@ -254,3 +254,108 @@ fn signature_checks_run_in_order() {
         Err(Code::UnknownAlg)
     );
 }
+
+/// A zip of exactly these entries, in this order.
+fn zip_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    use std::io::Write;
+    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    for (name, bytes) in entries {
+        writer
+            .start_file(*name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(bytes).unwrap();
+    }
+    writer.finish().unwrap().into_inner()
+}
+
+/// The entries of an opened bundle, as a zip would hold them.
+fn entries_of(opened: &legible_records::bundle::Opened) -> Vec<(String, Vec<u8>)> {
+    std::iter::once(("manifest.json".to_owned(), opened.manifest_bytes.clone()))
+        .chain(opened.files.iter().map(|(p, b)| (p.clone(), b.clone())))
+        .collect()
+}
+
+#[test]
+fn nested_manifest_sig_is_an_ordinary_file() {
+    let packed = pack_with(&inputs(), &[], &options(None)).unwrap();
+    let opened = open(&packed.zip, Limits::default()).unwrap();
+    let mut entries = entries_of(&opened);
+    entries.push(("x/manifest.sig".to_owned(), b"not a signature".to_vec()));
+    let borrowed: Vec<(&str, &[u8])> = entries
+        .iter()
+        .map(|(p, b)| (p.as_str(), b.as_slice()))
+        .collect();
+    let zip = zip_of(&borrowed);
+    let nested = open(&zip, Limits::default()).unwrap();
+    assert_eq!(nested.signature, None);
+    assert_eq!(
+        nested.files.get("x/manifest.sig").map(Vec::as_slice),
+        Some(&b"not a signature"[..])
+    );
+    let problems = verify(&nested, &[]).problems;
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("x/manifest.sig") && p.contains("not listed")),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn two_top_level_manifest_sigs_fail_to_open() {
+    let key = key();
+    let signed = pack_with(&inputs(), &[], &options(Some(&key))).unwrap();
+    let opened = open(&signed.zip, Limits::default()).unwrap();
+    let sig = opened.signature.clone().unwrap();
+    let mut entries = entries_of(&opened);
+    // A zip writer refuses repeated names, so write one under a name of the
+    // same length and rename it in the stored bytes.
+    entries.push(("manifest.sig".to_owned(), sig.clone()));
+    entries.push(("manifest.sih".to_owned(), sig));
+    let borrowed: Vec<(&str, &[u8])> = entries
+        .iter()
+        .map(|(p, b)| (p.as_str(), b.as_slice()))
+        .collect();
+    let mut zip = zip_of(&borrowed);
+    let from = b"manifest.sih";
+    let mut renamed = 0;
+    for i in 0..zip.len() - from.len() {
+        if &zip[i..i + from.len()] == from {
+            zip[i..i + from.len()].copy_from_slice(b"manifest.sig");
+            renamed += 1;
+        }
+    }
+    assert_eq!(renamed, 2, "local header and central directory");
+    let problems = open(&zip, Limits::default()).unwrap_err();
+    assert!(
+        problems.iter().any(|p| p.contains("appears twice")),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn add_signature_signs_non_canonical_stored_manifest() {
+    let key = key();
+    let packed = pack_with(&inputs(), &[], &options(None)).unwrap();
+    let opened = open(&packed.zip, Limits::default()).unwrap();
+    // The same manifest, written compactly: valid, but not how a writer writes it.
+    let compact = serde_json::to_vec(&opened.manifest).unwrap();
+    assert_ne!(compact, opened.manifest_bytes);
+    let mut entries = entries_of(&opened);
+    entries[0].1 = compact.clone();
+    let borrowed: Vec<(&str, &[u8])> = entries
+        .iter()
+        .map(|(p, b)| (p.as_str(), b.as_slice()))
+        .collect();
+    let zip = zip_of(&borrowed);
+    let signed = add_signature(&zip, &key, Limits::default()).unwrap();
+    let reopened = open(&signed, Limits::default()).unwrap();
+    assert_eq!(reopened.manifest_bytes, compact);
+    assert_eq!(
+        check_signature(&reopened, &trusting(&key), Some("acme.example")),
+        Ok(SignatureStatus::Verified {
+            publisher: "acme.example".to_owned(),
+            key: "2026-11".to_owned()
+        })
+    );
+}

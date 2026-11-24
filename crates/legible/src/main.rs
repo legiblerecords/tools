@@ -4,9 +4,11 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
-use legible_records::bundle::{self, Input, Limits};
+use legible_records::bundle::{self, Input, Limits, SignatureStatus};
+use legible_records::code::Code;
+use legible_records::keys::{KeySet, Pin, Trust};
 use legible_records::short_form::{self, Options};
-use legible_records::sign::SignatureFile;
+use legible_records::sign::{self, Context, SignatureFile, SigningKey};
 use legible_records::validate::Schemas;
 use legible_records::{compat, lint, COMMON_V1_ID};
 use serde_json::Value;
@@ -69,6 +71,99 @@ enum Command {
     /// Pack, unpack and verify bundles. To encrypt one, pipe it through age.
     #[command(subcommand)]
     Bundle(BundleCommand),
+    /// Make signing keys, and endorse key sets with them.
+    #[command(subcommand)]
+    Keys(KeysCommand),
+}
+
+#[derive(Subcommand)]
+enum KeysCommand {
+    /// Make a signing key. The secret key goes to a new file (mode 0600); the entry to add
+    /// to your keys.json is printed to stdout.
+    New {
+        /// Your domain, such as acme.example.
+        #[arg(long)]
+        publisher: String,
+        /// A name for the key, such as 2026-11.
+        #[arg(long)]
+        id: String,
+        /// Where to write the secret key. An existing file is refused.
+        #[arg(long, short = 'o')]
+        output: PathBuf,
+    },
+    /// Sign a key set (keys.json) with a key, writing keys.sig. The key must already be
+    /// in the key set readers hold: that is what makes the new set an endorsed one.
+    Sign {
+        /// The key set (.json), signed exactly as stored.
+        keys: PathBuf,
+        /// The secret key file from `keys new`.
+        #[arg(long, short = 'k')]
+        key: PathBuf,
+        /// Where to write keys.sig, or - for stdout.
+        #[arg(long, short = 'o')]
+        output: PathBuf,
+    },
+}
+
+#[derive(Args, Clone)]
+struct TrustArgs {
+    /// A key to trust, as <publisher>/<id>=<public_key> (base64url); repeat for several.
+    #[arg(long = "pin", value_name = "PUBLISHER/ID=PUBLIC_KEY")]
+    pins: Vec<String>,
+    /// A publisher's key set (keys.json) to trust; repeat for several. A file only:
+    /// nothing is fetched.
+    #[arg(long = "key-set", value_name = "FILE")]
+    key_sets: Vec<PathBuf>,
+}
+
+impl TrustArgs {
+    /// The keys given, or a message for a pin or key set that can't be used.
+    fn trust(&self) -> Result<Trust, Stop> {
+        let mut trust = Trust::default();
+        for text in &self.pins {
+            let pin = parse_pin(text).map_err(|e| Stop::Failed(format!("--pin {text}: {e}")))?;
+            trust.pins.push(pin);
+        }
+        for path in &self.key_sets {
+            let bytes = read_input(path)?;
+            let set = KeySet::parse(&bytes)
+                .map_err(|code| Stop::Failed(format!("{}: {}", path.display(), code.as_str())))?;
+            let publisher = set.publisher.clone();
+            if trust.key_sets.insert(publisher.clone(), set).is_some() {
+                return Err(Stop::Failed(format!(
+                    "{}: a second key set for {publisher}",
+                    path.display()
+                )));
+            }
+        }
+        Ok(trust)
+    }
+
+    fn given(&self) -> bool {
+        !self.pins.is_empty() || !self.key_sets.is_empty()
+    }
+}
+
+/// `<publisher>/<id>=<public_key>`.
+fn parse_pin(text: &str) -> Result<Pin, String> {
+    let shape = "expected <publisher>/<id>=<public_key>, such as acme.example/2026-11=<base64url>";
+    let (name, key) = text.split_once('=').ok_or(shape)?;
+    let (publisher, id) = name.split_once('/').ok_or(shape)?;
+    if !sign::is_publisher(publisher) {
+        return Err(format!("{publisher:?} is not a publisher: {shape}"));
+    }
+    if !sign::is_key_id(id) {
+        return Err(format!("{id:?} is not a key id: {shape}"));
+    }
+    let public_key: [u8; 32] = sign::from_b64url(key)
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or("the public key isn't 32 bytes of base64url without padding")?;
+    Ok(Pin {
+        publisher: publisher.to_owned(),
+        id: id.to_owned(),
+        public_key,
+    })
 }
 
 #[derive(Subcommand)]
@@ -99,9 +194,26 @@ enum BundleCommand {
         #[arg(long = "schema", short = 's')]
         schemas: Vec<PathBuf>,
         #[command(flatten)]
+        trust: TrustArgs,
+        #[command(flatten)]
         schema: SchemaArgs,
     },
-    /// Check a bundle's hashes, file list and references.
+    /// Sign a bundle's manifest as stored, writing a copy with manifest.sig.
+    Sign {
+        /// The bundle (.zip), or - for stdin. One that is already signed is refused.
+        bundle: PathBuf,
+        /// The secret key file from `keys new`.
+        #[arg(long, short = 'k')]
+        key: PathBuf,
+        /// Where to write the signed bundle (.zip), or - for stdout.
+        #[arg(long, short = 'o')]
+        output: PathBuf,
+    },
+    /// Check a bundle's hashes, file list, references and signature.
+    ///
+    /// Exit 0 doesn't mean a signature was checked: it did only when the signature line
+    /// says `verified`, which needs --pin or --key-set. Without them, a signed bundle is
+    /// reported `unverified`, and a bad bundle is still exit 1.
     Verify {
         /// The bundle (.zip), or - for stdin.
         bundle: PathBuf,
@@ -109,6 +221,8 @@ enum BundleCommand {
         /// Attachment references are always checked.
         #[arg(long = "schema", short = 's')]
         schemas: Vec<PathBuf>,
+        #[command(flatten)]
+        trust: TrustArgs,
         #[command(flatten)]
         schema: SchemaArgs,
     },
@@ -268,6 +382,7 @@ fn run(command: Command) -> Result<(), Stop> {
             outcome(ok)
         }
         Command::Bundle(command) => run_bundle(command),
+        Command::Keys(command) => run_keys(command),
     }
 }
 
@@ -309,19 +424,37 @@ fn run_bundle(command: BundleCommand) -> Result<(), Stop> {
         BundleCommand::Verify {
             bundle: path,
             schemas,
+            trust,
             schema,
         } => {
             let opened = open_bundle(&path)?;
-            verify_bundle(&path, &opened, &schemas, &schema)
+            verify_bundle(&path, &opened, &schemas, &trust, &schema)
+        }
+        BundleCommand::Sign {
+            bundle: path,
+            key,
+            output,
+        } => {
+            let key = read_key(&key)?;
+            let zip = read_input(&path)?;
+            let signed =
+                bundle::add_signature(&zip, &key, Limits::default()).map_err(|problems| {
+                    problems
+                        .iter()
+                        .for_each(|p| println!("{}: {p}", path.display()));
+                    Stop::Problems
+                })?;
+            write_output(&output, &signed)
         }
         BundleCommand::Unpack {
             bundle: path,
             directory,
             schemas,
+            trust,
             schema,
         } => {
             let opened = open_bundle(&path)?;
-            verify_bundle(&path, &opened, &schemas, &schema)?;
+            verify_bundle(&path, &opened, &schemas, &trust, &schema)?;
             let empty = match std::fs::read_dir(&directory) {
                 Ok(mut entries) => entries.next().is_none(),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
@@ -443,9 +576,11 @@ fn verify_bundle(
     path: &Path,
     opened: &bundle::Opened,
     schemas: &[PathBuf],
+    trust_args: &TrustArgs,
     args: &SchemaArgs,
 ) -> Result<(), Stop> {
     let bodies = load_schemas(schemas, args)?;
+    let trust = trust_args.trust()?;
     let report = bundle::verify(opened, &bodies);
     for problem in &report.problems {
         println!("{}: {problem}", path.display());
@@ -456,27 +591,107 @@ fn verify_bundle(
             path.display()
         );
     }
-    let (status, valid) = signature_status(opened);
-    println!("{}: {status}", path.display());
-    outcome(report.problems.is_empty() && valid)
+    let status = signature_status(opened, &trust, trust_args.given());
+    println!("{}", signature_line(opened, &status));
+    outcome(report.problems.is_empty() && status.is_ok())
 }
 
-/// What to say about a bundle's signature. Nothing here checks it: trusted
-/// keys aren't given to `bundle verify` yet, so a signed bundle is `unverified` too.
-/// The flag is false for a signature file that isn't the JSON the spec defines.
-fn signature_status(opened: &bundle::Opened) -> (String, bool) {
-    match &opened.signature {
-        None => ("unverified (not signed)".to_owned(), true),
-        Some(bytes) => match SignatureFile::parse(bytes) {
-            Ok(sig) => (
-                format!(
-                "unverified (signed by {} with key {}; no trusted keys given, so the signature wasn't checked)",
-                sig.publisher, sig.key
+/// A bundle's signature against what the reader trusts. A signed bundle with
+/// no trusted keys given isn't checked: it is `Unverified`, which is not a
+/// failure. Any `Code` is a problem with the bundle.
+fn signature_status(
+    opened: &bundle::Opened,
+    trust: &Trust,
+    trust_given: bool,
+) -> Result<SignatureStatus, Code> {
+    if !trust_given {
+        if let Some(bytes) = &opened.signature {
+            SignatureFile::parse(bytes)?;
+            return Ok(SignatureStatus::Unverified);
+        }
+    }
+    bundle::check_signature(opened, trust, None)
+}
+
+/// The line `bundle verify` prints about the signature, for every outcome.
+fn signature_line(opened: &bundle::Opened, status: &Result<SignatureStatus, Code>) -> String {
+    match status {
+        Ok(SignatureStatus::Verified { publisher, key }) => {
+            format!("signature: verified ({publisher} {key})")
+        }
+        Ok(SignatureStatus::Unverified) => {
+            match opened
+                .signature
+                .as_deref()
+                .and_then(|bytes| SignatureFile::parse(bytes).ok())
+            {
+                Some(sig) => format!(
+                    "signature: unverified (signed by {} {}; no trusted keys given)",
+                    sig.publisher, sig.key
                 ),
-                true,
-            ),
-            Err(code) => (format!("{}: manifest.sig", code.as_str()), false),
-        },
+                None => "signature: unverified".to_owned(),
+            }
+        }
+        Err(code) => format!("signature: {}", code.as_str()),
+    }
+}
+
+fn read_key(path: &Path) -> Result<SigningKey, Stop> {
+    let bytes = zeroize::Zeroizing::new(read_input(path)?);
+    SigningKey::from_json(&bytes).map_err(|e| Stop::Failed(format!("{}: {e}", path.display())))
+}
+
+fn run_keys(command: KeysCommand) -> Result<(), Stop> {
+    match command {
+        KeysCommand::New {
+            publisher,
+            id,
+            output,
+        } => {
+            if output == Path::new("-") {
+                return Err(Stop::Failed(
+                    "-o -: the secret key goes to a file, not stdout".to_owned(),
+                ));
+            }
+            let key = SigningKey::generate(&publisher, &id).map_err(Stop::Failed)?;
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            // Created private: never written and then restricted.
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+            let mut file = options
+                .open(&output)
+                .map_err(|e| Stop::Failed(format!("{}: {e}", output.display())))?;
+            if let Err(e) = std::io::Write::write_all(&mut file, &key.to_json()) {
+                drop(file);
+                let _ = std::fs::remove_file(&output);
+                return Err(Stop::Failed(format!("{}: {e}", output.display())));
+            }
+            let entry = serde_json::json!({
+                "id": key.id,
+                "alg": "ed25519",
+                "public_key": sign::b64url(&key.public().key),
+                "created_at": legible_records::time::format(legible_records::time::now()),
+            });
+            println!("{}", pretty(&entry));
+            Ok(())
+        }
+        KeysCommand::Sign { keys, key, output } => {
+            let key = read_key(&key)?;
+            let bytes = read_input(&keys)?;
+            let set = KeySet::parse(&bytes)
+                .map_err(|code| Stop::Failed(format!("{}: {}", keys.display(), code.as_str())))?;
+            if set.publisher != key.publisher {
+                return Err(Stop::Failed(format!(
+                    "{}: the key set is for {}, but the key is {}'s",
+                    keys.display(),
+                    set.publisher,
+                    key.publisher
+                )));
+            }
+            let signature = sign::sign(&key, Context::Keys, &bytes);
+            write_output(&output, &signature.to_bytes())
+        }
     }
 }
 

@@ -414,6 +414,14 @@ pub fn is_safe_path(path: &str) -> bool {
 pub fn open(zip: &[u8], limits: Limits) -> Result<Opened, Vec<String>> {
     let mut archive =
         ZipArchive::new(Cursor::new(zip)).map_err(|e| vec![format!("not a zip file: {e}")])?;
+    // The zip reader keeps one entry per name and drops the rest, so repeats
+    // would never reach the check below: two entries named manifest.json or
+    // manifest.sig must not let a reader and a signer see different files.
+    if archive.has_duplicate_names() {
+        return Err(vec![
+            "a file name appears twice in the zip's central directory".to_owned(),
+        ]);
+    }
     if archive.len() > limits.max_files {
         return Err(vec![format!(
             "the bundle holds {} entries; the limit is {}",

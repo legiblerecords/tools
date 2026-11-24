@@ -16,6 +16,11 @@ pub fn parse(s: &str) -> Result<Instant, String> {
         .map_err(|e| format!("{s:?} is not an RFC 3339 date-time: {e}"))
 }
 
+/// The current instant, from the system clock.
+pub fn now() -> Instant {
+    Instant(OffsetDateTime::now_utc())
+}
+
 /// Writes an instant in UTC with millisecond precision and a `Z`.
 pub fn format(i: Instant) -> String {
     let t = i.0.to_offset(UtcOffset::UTC);
