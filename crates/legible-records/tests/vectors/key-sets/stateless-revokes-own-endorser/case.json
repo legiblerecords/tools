@@ -1,0 +1,12 @@
+{
+  "expect": "needs_approval",
+  "name": "stateless-revokes-own-endorser",
+  "pins": [
+    {
+      "id": "2025-06",
+      "public_key": "Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc",
+      "publisher": "acme.example"
+    }
+  ],
+  "previous": null
+}

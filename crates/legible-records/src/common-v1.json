@@ -30,6 +30,11 @@
       "format": "date-time",
       "type": "string"
     },
+    "domain": {
+      "description": "A publisher, a lowercase domain of two or more labels, with no scheme, port or path.",
+      "pattern": "^(?=.{1,253}$)[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$",
+      "type": "string"
+    },
     "email": {
       "format": "email",
       "type": "string"

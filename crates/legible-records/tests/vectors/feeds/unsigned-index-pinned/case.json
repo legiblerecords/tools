@@ -1,0 +1,29 @@
+{
+  "connection": {
+    "$type": "org.legiblerecords.feed-connection",
+    "auth": {
+      "method": "bearer",
+      "token_env": "ACME_FEED_TOKEN"
+    },
+    "feed": "acme.example/track",
+    "keys": [
+      {
+        "alg": "ed25519",
+        "id": "2026-11",
+        "public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+        "publisher": "acme.example"
+      }
+    ],
+    "location": {
+      "kind": "https",
+      "url": "https://feeds.acme.example/track/"
+    },
+    "version": 1
+  },
+  "expect": {
+    "index": "unsigned_from_pinned_publisher",
+    "streams": {}
+  },
+  "name": "unsigned-index-pinned",
+  "state": null
+}

@@ -1,0 +1,27 @@
+{
+  "expect": {
+    "error": "revoked_key"
+  },
+  "expected_publisher": "acme.example",
+  "name": "signed-revoked-backdated",
+  "trust": {
+    "key_sets": [
+      {
+        "$type": "org.legiblerecords.keys",
+        "keys": [
+          {
+            "alg": "ed25519",
+            "created_at": "2026-11-24T00:00:00Z",
+            "id": "2026-11",
+            "public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+            "revoked_at": "2026-12-01T00:00:00Z"
+          }
+        ],
+        "publisher": "acme.example",
+        "updated_at": "2026-11-24T00:00:00Z",
+        "version": 1
+      }
+    ],
+    "pins": []
+  }
+}
