@@ -573,10 +573,11 @@ fn open_bundle(path: &Path, identity: Option<&Path>) -> Result<bundle::Opened, S
             String::from_utf8(read_input(identity)?)
                 .map_err(|_| Stop::Failed(format!("{}: not text", identity.display())))?,
         );
-        bytes = legible_records::age::decrypt(&bytes, &text).map_err(|e| {
-            println!("{}: couldn't decrypt: {e}", path.display());
-            Stop::Problems
-        })?;
+        bytes = legible_records::age::decrypt(&bytes, &text, Limits::default().max_stored_bytes())
+            .map_err(|e| {
+                println!("{}: couldn't decrypt: {e}", path.display());
+                Stop::Problems
+            })?;
     }
     bundle::open(&bytes, Limits::default()).map_err(|problems| {
         for problem in &problems {

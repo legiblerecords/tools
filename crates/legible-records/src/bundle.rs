@@ -34,6 +34,20 @@ pub struct Limits {
     pub max_total_bytes: u64,
 }
 
+impl Limits {
+    /// The most a bundle's stored file (its zip, or its `.zip.age`) may
+    /// hold, for a reader to cap a download or a decryption at before
+    /// [`open`] checks the contents: the files' total, plus room for the
+    /// zip's headers (up to 1 KiB a file) and age's framing (16 bytes in
+    /// every 64 KiB, and its header).
+    pub fn max_stored_bytes(&self) -> u64 {
+        self.max_total_bytes
+            .saturating_add(self.max_total_bytes / 1024)
+            .saturating_add((self.max_files as u64).saturating_mul(1024))
+            .saturating_add(64 * 1024)
+    }
+}
+
 impl Default for Limits {
     fn default() -> Self {
         Limits {

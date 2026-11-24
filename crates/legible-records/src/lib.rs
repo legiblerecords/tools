@@ -8,6 +8,7 @@
 //! - [`feed`]: feed indexes, connection files, reader state and reading a
 //!   feed;
 //! - [`keys`]: key sets, endorsement and what a reader trusts;
+//! - `net`: reading feeds and key sets over HTTPS and S3 (feature `net`);
 //! - [`sign`]: Ed25519 keys, contexts and signature files;
 //! - [`time`]: RFC 3339 instants;
 //! - [`short_form`]: the schema language, expanding short-form schemas to
@@ -26,6 +27,8 @@ pub mod compat;
 pub mod feed;
 pub mod keys;
 pub mod lint;
+#[cfg(feature = "net")]
+pub mod net;
 pub mod short_form;
 pub mod sign;
 pub mod time;

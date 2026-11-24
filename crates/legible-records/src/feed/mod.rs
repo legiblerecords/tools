@@ -21,3 +21,7 @@ pub use pull::{pull, Delivered, IndexOutcome, PullOptions, PullReport, StreamOut
 pub use source::DirSource;
 pub use source::{Fetched, KeySetFiles, KeySource, NoKeySource, Source};
 pub use state::{ReaderState, StreamState};
+
+/// The most a feed index (`feed.json`, or `feed.json.age` and what it
+/// decrypts to), its `feed.sig`, or a key set may hold.
+pub const MAX_INDEX_BYTES: u64 = 1 << 20;

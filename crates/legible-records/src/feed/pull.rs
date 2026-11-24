@@ -7,6 +7,7 @@ use super::connection::Connection;
 use super::index::{check_bundle_paths, parse_feed, Feed, StreamEntry};
 use super::source::{Fetched, KeySource, Source};
 use super::state::{ReaderState, StreamState};
+use super::MAX_INDEX_BYTES;
 use crate::bundle::{
     check_signature, check_signed, open, sha256_hex, verify, Limits, Opened, SignatureStatus,
 };
@@ -107,16 +108,16 @@ pub struct PullOptions<'a> {
     pub limits: Limits,
 }
 
-/// Decrypts a stored file for `pull`. The error is the reason, without the
-/// path.
+/// Decrypts a stored file for `pull`, to at most `max_bytes`. The error is
+/// the reason, without the path.
 #[cfg(feature = "age")]
-fn unseal(bytes: &[u8], identity: Option<&str>) -> Result<Vec<u8>, String> {
+fn unseal(bytes: &[u8], identity: Option<&str>, max_bytes: u64) -> Result<Vec<u8>, String> {
     let identity = identity.ok_or("it is encrypted, and no age identity is configured")?;
-    crate::age::decrypt(bytes, identity)
+    crate::age::decrypt(bytes, identity, max_bytes)
 }
 
 #[cfg(not(feature = "age"))]
-fn unseal(_bytes: &[u8], _identity: Option<&str>) -> Result<Vec<u8>, String> {
+fn unseal(_bytes: &[u8], _identity: Option<&str>, _max_bytes: u64) -> Result<Vec<u8>, String> {
     Err("it is encrypted, and this reader was built without age".to_owned())
 }
 
@@ -235,7 +236,7 @@ pub fn pull(
     // 3. Decrypt, then the index must be a valid feed whose bundle paths
     // name their own hashes in the feed's mode.
     let stored = if encrypted {
-        match unseal(&stored, options.identity) {
+        match unseal(&stored, options.identity, MAX_INDEX_BYTES) {
             Ok(plain) => plain,
             Err(e) => return report.index(IndexOutcome::Failed(format!("feed.json.age: {e}"))),
         }
@@ -465,7 +466,7 @@ fn check_stream(
     // An encrypted feed's bundles are encrypted: the download was checked
     // over the ciphertext, and now it is opened.
     let bytes = if entry.bundle.ends_with(".age") {
-        match unseal(&bytes, options.identity) {
+        match unseal(&bytes, options.identity, options.limits.max_stored_bytes()) {
             Ok(plain) => plain,
             Err(e) => return Err(failed(&e)),
         }

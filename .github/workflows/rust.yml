@@ -17,5 +17,16 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
       - run: cargo fmt --all --check
-      - run: cargo clippy --all-targets --locked -- -D warnings
-      - run: cargo test --locked
+      - run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      # MinIO for the S3 test in crates/legible-records/tests/net.rs, which
+      # fails rather than skips in CI if LEGIBLE_TEST_S3_ENDPOINT isn't set.
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio -p 9000:9000 -e MINIO_ROOT_USER=test -e MINIO_ROOT_PASSWORD=testtesttest minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:9000/minio/health/live && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:9000/minio/health/live
+          echo "LEGIBLE_TEST_S3_ENDPOINT=http://127.0.0.1:9000" >> "$GITHUB_ENV"
+      - run: cargo test --workspace --all-features --locked

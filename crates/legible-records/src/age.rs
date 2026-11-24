@@ -14,11 +14,6 @@ pub fn is_encrypted(bytes: &[u8]) -> bool {
     bytes.starts_with(BINARY) || bytes.starts_with(ARMORED)
 }
 
-/// The most a decrypted file may hold, so that a small ciphertext can't
-/// fill memory.
-#[cfg(feature = "age")]
-const MAX_PLAINTEXT: u64 = 1 << 30;
-
 /// Encrypts `bytes` to the age recipients given (`age1...`), as a binary
 /// age file.
 #[cfg(feature = "age")]
@@ -45,10 +40,12 @@ pub fn encrypt(bytes: &[u8], recipients: &[String]) -> Result<Vec<u8>, String> {
 }
 
 /// Decrypts a binary or armored age file with the identities in
-/// `identities`, the text of an identity file. An error never repeats the
-/// identity text.
+/// `identities`, the text of an identity file, refusing one whose plaintext
+/// is larger than `max_bytes` without holding more than that, so that a
+/// small ciphertext can't fill memory. An error never repeats the identity
+/// text.
 #[cfg(feature = "age")]
-pub fn decrypt(bytes: &[u8], identities: &str) -> Result<Vec<u8>, String> {
+pub fn decrypt(bytes: &[u8], identities: &str, max_bytes: u64) -> Result<Vec<u8>, String> {
     use std::io::Read;
     let file = age::IdentityFile::from_buffer(std::io::BufReader::new(identities.as_bytes()))
         .map_err(|_| "the identity file couldn't be read".to_owned())?;
@@ -66,11 +63,13 @@ pub fn decrypt(bytes: &[u8], identities: &str) -> Result<Vec<u8>, String> {
         .map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     (&mut stream)
-        .take(MAX_PLAINTEXT + 1)
+        .take(max_bytes.saturating_add(1))
         .read_to_end(&mut out)
         .map_err(|e| e.to_string())?;
-    if out.len() as u64 > MAX_PLAINTEXT {
-        return Err("the decrypted file is too large".to_owned());
+    if out.len() as u64 > max_bytes {
+        return Err(format!(
+            "the decrypted file is larger than {max_bytes} bytes"
+        ));
     }
     Ok(out)
 }

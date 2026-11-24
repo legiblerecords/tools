@@ -12,7 +12,7 @@ name = "legible"
 path = "src/main.rs"
 
 [dependencies]
-legible-records = { workspace = true, features = ["validate", "age"] }
+legible-records = { workspace = true, features = ["validate", "age", "net"] }
 serde_json.workspace = true
 clap.workspace = true
 zeroize.workspace = true
