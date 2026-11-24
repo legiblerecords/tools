@@ -2324,3 +2324,28 @@ mod record_sets {
         );
     }
 }
+
+#[test]
+fn pack_set_for_an_unknown_kind_exits_1() {
+    let dir = Temp::new("set-unknown-kind");
+    std::fs::create_dir_all(dir.path("in")).unwrap();
+    std::fs::write(
+        dir.path("in/a-1.json"),
+        r#"{"$type":"example.alert","id":"a-1","version":1}"#,
+    )
+    .unwrap();
+    let packed = legible(&[
+        arg("bundle"),
+        arg("pack"),
+        &dir.path("in"),
+        arg("--set"),
+        arg("alret"),
+        arg("-o"),
+        &dir.path("b.zip"),
+    ]);
+    assert_eq!(packed.status.code(), Some(1), "{packed:?}");
+    assert!(
+        String::from_utf8_lossy(&packed.stderr).contains("alret"),
+        "{packed:?}"
+    );
+}

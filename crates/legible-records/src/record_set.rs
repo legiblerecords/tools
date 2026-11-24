@@ -13,7 +13,8 @@ use sha2::{Digest, Sha256};
 /// The longest line the reference tools read, in bytes, `\n` included.
 pub const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 
-/// A kind with more records than this (of one version) is packed as a set.
+/// A kind with more records than this, across its versions, is packed as a
+/// set (of its most common version).
 pub const SET_THRESHOLD: usize = 1000;
 
 /// Where a kind's record set lives in a bundle.
@@ -112,18 +113,11 @@ pub fn es_number(x: f64) -> String {
     }
 }
 
-fn is_key(text: &str) -> bool {
-    !text.is_empty()
-        && text
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-}
-
 fn id_of(record: &Value) -> Option<&str> {
     record
         .get("id")
         .and_then(Value::as_str)
-        .filter(|id| is_key(id))
+        .filter(|id| crate::bundle::is_key(id))
 }
 
 /// A record set holding `records`, sorted by id. Refuses a record with no id
@@ -202,6 +196,12 @@ impl<'a, R: Read> Reader<'a, R> {
             return Some(self.fail(format!("line {n}: longer than {MAX_LINE_BYTES} bytes")));
         }
         self.line = n;
+        if n > self.expect.count {
+            return Some(self.fail(format!(
+                "line {n}: more lines than the manifest's count, {}",
+                self.expect.count
+            )));
+        }
         if raw.last() != Some(&b'\n') {
             self.final_newline = false;
             self.ended = true;
@@ -214,6 +214,9 @@ impl<'a, R: Read> Reader<'a, R> {
         let body = &raw[..raw.len() - 1];
         if body.is_empty() {
             return self.fail(format!("line {n}: blank line"));
+        }
+        if n == 1 && body.starts_with(&[0xEF, 0xBB, 0xBF]) {
+            return self.fail("line 1: starts with a byte order mark".to_owned());
         }
         if body.last() == Some(&b'\r') {
             return self.fail(format!("line {n}: ends with \\r\\n, not \\n"));

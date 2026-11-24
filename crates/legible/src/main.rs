@@ -167,7 +167,7 @@ enum BundleCommand {
         #[arg(long = "schema", short = 's')]
         schemas: Vec<PathBuf>,
         /// Write this kind's records as one record set, records/<kind>.ndjson; repeat for
-        /// several. Without it, a kind with more than 1,000 records of one version is
+        /// several. Without it, a kind with more than 1,000 records (across its versions) is
         /// written as a set. .ndjson inputs are always packed as the sets they are.
         #[arg(long = "set", value_name = "KIND", conflicts_with = "no_sets")]
         sets: Vec<String>,

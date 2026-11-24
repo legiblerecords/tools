@@ -325,3 +325,77 @@ fn a_set_named_by_title_verifies_without_the_schema() {
         verify(&opened, &[]).problems
     );
 }
+
+#[test]
+fn reader_stops_once_lines_exceed_count() {
+    let bytes = record_set::write(&alerts(3, 1)).unwrap();
+    let sha = sha256_hex(&bytes);
+    let expect = Expect {
+        record_type: "example.alert",
+        record_version: 1,
+        count: 1,
+        sha256: &sha,
+    };
+    let mut reader = Reader::new(Cursor::new(bytes), expect);
+    assert!(reader.next_record().unwrap().is_ok());
+    let second = reader.next_record().unwrap().unwrap_err();
+    assert!(
+        second.contains("line 2") && second.contains("count"),
+        "{second}"
+    );
+    assert!(reader.next_record().is_none(), "nothing after a problem");
+}
+
+#[test]
+fn a_byte_order_mark_is_named() {
+    let mut bytes = "\u{feff}".as_bytes().to_vec();
+    bytes.extend(record_set::write(&alerts(1, 1)).unwrap());
+    let sha = sha256_hex(&bytes);
+    let problems = record_set::check(&bytes, expect_for(&bytes, &sha, 1)).unwrap_err();
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("line 1") && p.contains("byte order mark")),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn set_for_a_kind_with_no_records_is_refused() {
+    let inputs: Vec<Input> = alerts(2, 1)
+        .iter()
+        .map(|a| input(&format!("{}.json", a["id"].as_str().unwrap()), a))
+        .collect();
+    let options = PackOptions {
+        sets: SetMode::Kinds(vec!["alret".to_owned()]),
+        ..PackOptions::default()
+    };
+    let problems = pack_with(&inputs, &[], &options).unwrap_err();
+    assert!(problems.iter().any(|p| p.contains("alret")), "{problems:?}");
+}
+
+#[test]
+fn threshold_counts_every_version_of_a_kind() {
+    let mut inputs: Vec<Input> = Vec::new();
+    for version in [1, 2] {
+        for i in 0..600 {
+            let a = alert(&format!("v{version}-{i:04}"), version);
+            inputs.push(input(&format!("v{version}-{i}.json"), &a));
+        }
+    }
+    let packed = pack_with(&inputs, &[], &PackOptions::default()).unwrap();
+    let set = packed.manifest["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["path"] == "records/alert.ndjson")
+        .expect("1,200 alerts make a set");
+    assert_eq!(
+        set["record_version"],
+        json!(2),
+        "ties go to the higher version"
+    );
+    assert_eq!(set["count"], json!(600));
+    let opened = open(&packed.zip, Limits::default()).unwrap();
+    assert!(verify(&opened, &[]).problems.is_empty());
+}

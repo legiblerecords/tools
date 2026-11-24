@@ -111,8 +111,8 @@ pub struct PackOptions<'a> {
 /// always kept as the record sets they are.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum SetMode {
-    /// A kind with more than [`crate::record_set::SET_THRESHOLD`] records of
-    /// one version.
+    /// A kind with more than [`crate::record_set::SET_THRESHOLD`] records
+    /// across its versions; the set holds its most common version.
     #[default]
     Auto,
     /// No kind, other than `.ndjson` inputs.
@@ -187,7 +187,8 @@ fn media_type(name: &str) -> &'static str {
     }
 }
 
-fn is_key(text: &str) -> bool {
+/// True for a record key or kind: lowercase letters, digits and hyphens.
+pub(crate) fn is_key(text: &str) -> bool {
     !text.is_empty()
         && text
             .chars()
@@ -334,15 +335,24 @@ pub fn pack_with(
             });
         }
     }
+    if let SetMode::Kinds(kinds) = &options.sets {
+        for kind in kinds {
+            if !loose.contains_key(kind) && !given_sets.contains(kind) {
+                problems.push(format!("--set {kind}: no records of that kind to pack"));
+            }
+        }
+    }
     for (kind, versions) in loose {
         let record_type = &kind_types[&kind];
+        // A kind with more than the threshold, across its versions, gets a set.
+        let total: usize = versions.values().map(Vec::len).sum();
         // The version with the most records may become the kind's set.
         let set_version = versions
             .iter()
             .max_by_key(|(version, records)| (records.len(), **version))
             .map(|(version, records)| (*version, records.len()))
             .filter(|(_, count)| match &options.sets {
-                SetMode::Auto => *count > crate::record_set::SET_THRESHOLD,
+                SetMode::Auto => total > crate::record_set::SET_THRESHOLD && *count > 0,
                 SetMode::Never => false,
                 SetMode::Kinds(kinds) => kinds.contains(&kind),
             })
