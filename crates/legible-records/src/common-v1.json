@@ -61,7 +61,8 @@
           "description": "Of the record's content line, pinning exactly what it says."
         },
         "type": {
-          "description": "The record's $type, such as tech.monorail.policy.document.",
+          "description": "The record's $type, a type identifier such as tech.monorail.policy.document, not its short name.",
+          "pattern": "^[a-z0-9-]+(\\.[a-z0-9-]+)+$",
           "type": "string"
         }
       },
@@ -85,7 +86,7 @@
           "type": "string"
         },
         "system": {
-          "description": "Where the id comes from, in lowercase - github, gitlab, okta, entra, google, slack, serial, outpost:acme.example.",
+          "description": "Where the id comes from, in lowercase - github, gitlab, okta, entra, google, slack, serial, outpost:acme.example. Each system names one kind of id (records.md § Pointing at records elsewhere).",
           "pattern": "^[a-z0-9][a-z0-9.:-]*$",
           "type": "string"
         }

@@ -62,4 +62,6 @@ fn validates_with_new_common_defs() {
     assert_eq!(schemas.validate(&schema, &good).unwrap(), vec![]);
     let bad = json!({"repo": {"system": "GitHub", "id": "acme/api"}});
     assert_eq!(schemas.validate(&schema, &bad).unwrap().len(), 1);
+    let short_name = json!({"policy": {"type": "policy", "key": "access-control"}});
+    assert_eq!(schemas.validate(&schema, &short_name).unwrap().len(), 1);
 }
