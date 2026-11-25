@@ -19,6 +19,7 @@ age = ["dep:age"]
 net = ["dep:ureq", "dep:rusty-s3", "dep:url"]
 
 [dependencies]
+serde.workspace = true
 serde_json.workspace = true
 yaml-rust2.workspace = true
 zip.workspace = true

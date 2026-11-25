@@ -403,18 +403,14 @@ fn run(command: Command) -> Result<(), Stop> {
             for file in &files {
                 let text = std::fs::read(file)
                     .map_err(|e| Stop::Failed(format!("{}: {e}", file.display())))?;
-                match serde_json::from_slice::<serde_json::Value>(&text) {
-                    Ok(record @ serde_json::Value::Object(_)) => println!(
+                match legible_records::record::parse(&text) {
+                    Ok(record) => println!(
                         "{}  {}",
                         legible_records::record::content_sha256(&record),
                         file.display()
                     ),
-                    Ok(_) => {
-                        eprintln!("{}: not a JSON object", file.display());
-                        clean = false;
-                    }
-                    Err(e) => {
-                        eprintln!("{}: not JSON: {e}", file.display());
+                    Err(problem) => {
+                        eprintln!("{}: {problem}", file.display());
                         clean = false;
                     }
                 }

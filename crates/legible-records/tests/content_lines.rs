@@ -1,17 +1,43 @@
 //! Content lines and content hashes (spec/records.md § Content lines), against
 //! the spec's vectors/content-lines.json.
 
-use legible_records::record::{content_line, content_sha256};
+use legible_records::record::{content_line, content_sha256, parse};
 use serde_json::Value;
 
-fn cases() -> Vec<Value> {
+fn file() -> Value {
     let path = format!(
         "{}/tests/vectors/content-lines.json",
         env!("CARGO_MANIFEST_DIR")
     );
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
-    let file: Value = serde_json::from_str(&text).expect("vectors are JSON");
-    file["cases"].as_array().expect("cases").clone()
+    serde_json::from_str(&text).expect("vectors are JSON")
+}
+
+fn cases() -> Vec<Value> {
+    file()["cases"].as_array().expect("cases").clone()
+}
+
+#[test]
+fn refused_vectors() {
+    let file = file();
+    let refused = file["refused"].as_array().expect("refused");
+    assert!(refused.len() >= 5);
+    for case in refused {
+        let text = case["record_text"].as_str().unwrap();
+        assert!(
+            parse(text.as_bytes()).is_err(),
+            "{} was accepted",
+            case["name"]
+        );
+    }
+}
+
+#[test]
+fn parse_accepts_every_content_case() {
+    for case in cases() {
+        let text = serde_json::to_vec(&case["record"]).unwrap();
+        assert_eq!(parse(&text).expect("accepted"), case["record"]);
+    }
 }
 
 #[test]
@@ -62,6 +88,8 @@ fn validates_with_new_common_defs() {
     assert_eq!(schemas.validate(&schema, &good).unwrap(), vec![]);
     let bad = json!({"repo": {"system": "GitHub", "id": "acme/api"}});
     assert_eq!(schemas.validate(&schema, &bad).unwrap().len(), 1);
+    let empty_id = json!({"repo": {"system": "okta", "id": ""}});
+    assert_eq!(schemas.validate(&schema, &empty_id).unwrap().len(), 1);
     let short_name = json!({"policy": {"type": "policy", "key": "access-control"}});
     assert_eq!(schemas.validate(&schema, &short_name).unwrap().len(), 1);
 }

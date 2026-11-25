@@ -49,7 +49,7 @@
         },
         "publisher": {
           "$ref": "#/$defs/domain",
-          "description": "Whose record it is, when not the publisher of this one."
+          "description": "Whose record it is. Left out only when it is this record's own publisher's and this record travels where that publisher is known - a signed bundle or a feed."
         },
         "revision": {
           "description": "The record's revision, for types that number their revisions (such as a policy).",
@@ -83,6 +83,7 @@
       "properties": {
         "id": {
           "description": "The id in that system, as that system writes it - acme/api, 00u1ab2cd3.",
+          "minLength": 1,
           "type": "string"
         },
         "system": {

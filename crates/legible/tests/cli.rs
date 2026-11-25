@@ -2396,3 +2396,13 @@ fn record_hash_refuses_non_object() {
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("not a JSON object"));
 }
+
+#[test]
+fn record_hash_refuses_duplicate_keys() {
+    let dir = Temp::new("record-hash-dupes");
+    let file = dir.path("dupes.json");
+    std::fs::write(&file, r#"{"id": "a", "id": "b"}"#).unwrap();
+    let out = legible(&[arg("record"), arg("hash"), &file]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("twice"));
+}

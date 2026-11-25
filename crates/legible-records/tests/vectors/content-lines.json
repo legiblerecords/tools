@@ -123,5 +123,27 @@
       "sha256": "36f6fb513dccbc83aca8f177426039027b4732c139212ab2c2d9f9c42acc9b90"
     }
   ],
-  "description": "Content lines and their SHA-256 (spec/records.md § Content lines). plain and provenance-removed hash alike; changed-field differs."
+  "description": "Content lines and their SHA-256 (spec/records.md § Content lines). plain and provenance-removed hash alike; changed-field differs. Each refused record_text has no canonical form, and a tool refuses it.",
+  "refused": [
+    {
+      "name": "duplicate-key",
+      "record_text": "{\"$type\":\"tech.monorail.policy.document\",\"id\":\"access-control\",\"version\":1,\"title\":\"A\",\"title\":\"B\"}"
+    },
+    {
+      "name": "integer-beyond-double",
+      "record_text": "{\"$type\":\"tech.monorail.policy.document\",\"id\":\"access-control\",\"version\":1,\"count\":9007199254740993}"
+    },
+    {
+      "name": "long-integer",
+      "record_text": "{\"$type\":\"tech.monorail.policy.document\",\"id\":\"access-control\",\"version\":1,\"count\":123456789012345678901234567890}"
+    },
+    {
+      "name": "lone-surrogate",
+      "record_text": "{\"$type\":\"tech.monorail.policy.document\",\"id\":\"access-control\",\"version\":1,\"title\":\"\\ud800\"}"
+    },
+    {
+      "name": "not-an-object",
+      "record_text": "[\"access-control\"]"
+    }
+  ]
 }
