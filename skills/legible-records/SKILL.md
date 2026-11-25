@@ -11,12 +11,23 @@ Legible Records are security records as plain JSON: each file names its `$type` 
 
 | What | Where |
 |---|---|
-| The `legible` tool | `cargo install --git https://github.com/legiblerecords/tools legible` (Rust). Or `npx @legiblerecords/legible@0.1.0`, which has the schema and bundle commands and age encryption, but no `record hash` or feeds. |
+| The `legible` tool | A build from `https://github.com/legiblerecords/tools/releases/latest/download/legible-<target>.tar.gz` (see below), checked against `SHA256SUMS` from the same place. Or `cargo install --git https://github.com/legiblerecords/tools legible` (Rust 1.89+). Or `npx @legiblerecords/legible@0.1.0`, which has the schema and bundle commands and age encryption, but no `record hash` or feeds. |
 | The docs, for models | `https://legiblerecords.org/llms.txt` lists every page as Markdown; `/llms-full.txt` is all of it in one file. |
 | The spec | `https://legiblerecords.org/spec/records.md` and the other pages under Specification in `llms.txt`. The test vectors are in `https://github.com/legiblerecords/spec`, under `vectors/`. The spec is normative: where a guide differs, the spec is right. |
 | Monorail's types | `https://github.com/Monorail-Tech/track-legible-records`, `schemas/<type>/v<n>.yaml`, and the docs' Monorail types page. |
 
-If `legible` is already on your path or you were given a binary, use that: check it with `legible --version`. If you can't get the tool, stop and say what's missing. Don't write `manifest.json`, hashes, record sets or signatures by hand: the bytes must be canonical, and a bundle that is nearly right is refused.
+To download it, pick the target for the machine (`uname -sm`): `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` (static, any distribution), `aarch64-apple-darwin`, `x86_64-apple-darwin`, or `x86_64-pc-windows-msvc` (a `.zip`, with `legible.exe`):
+
+```sh
+T=x86_64-unknown-linux-musl
+U=https://github.com/legiblerecords/tools/releases/latest/download
+curl -fsSLO "$U/legible-$T.tar.gz"
+curl -fsSL "$U/SHA256SUMS" | sha256sum -c --ignore-missing   # macOS: shasum -a 256 -c --ignore-missing
+tar -xzf "legible-$T.tar.gz" && export PATH="$PWD/legible-$T:$PATH"
+legible --version
+```
+
+If the checksum doesn't match, stop: don't use the binary. If `legible` is already on your path or you were given a binary, use that: check it with `legible --version`. If you can't get the tool, stop and say what's missing. Don't write `manifest.json`, hashes, record sets or signatures by hand: the bytes must be canonical, and a bundle that is nearly right is refused.
 
 ## Using it or implementing it
 
