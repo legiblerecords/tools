@@ -2,7 +2,7 @@
 
 Tools for [Legible Records](https://github.com/legiblerecords/spec): legible, portable, pragmatic security records.
 
-Status: early. Nothing here is released yet.
+Status: early. The first release is [v0.1.0](https://github.com/legiblerecords/tools/releases/tag/v0.1.0); expect changes before 1.0.
 
 ## What's here
 
