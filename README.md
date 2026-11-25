@@ -14,9 +14,23 @@ Status: early. Nothing here is released yet.
 
 ## The command-line tool
 
+Download a build for your platform from the [releases](https://github.com/legiblerecords/tools/releases): static Linux (x86_64, aarch64), macOS (Apple silicon, Intel) and Windows (x86_64), with `SHA256SUMS` and build provenance. For example, on Linux x86_64:
+
+```sh
+curl -fsSLO https://github.com/legiblerecords/tools/releases/latest/download/legible-x86_64-unknown-linux-musl.tar.gz
+curl -fsSL https://github.com/legiblerecords/tools/releases/latest/download/SHA256SUMS | sha256sum -c --ignore-missing
+tar -xzf legible-x86_64-unknown-linux-musl.tar.gz && ./legible-x86_64-unknown-linux-musl/legible --version
+```
+
+The other archives are `legible-aarch64-unknown-linux-musl.tar.gz`, `legible-aarch64-apple-darwin.tar.gz`, `legible-x86_64-apple-darwin.tar.gz` and `legible-x86_64-pc-windows-msvc.zip`. `gh attestation verify <archive> --repo legiblerecords/tools` checks that an archive was built by this repository's release workflow.
+
+Or build it from source, with Rust 1.89 or later:
+
 ```sh
 cargo install --git https://github.com/legiblerecords/tools legible
 ```
+
+A release is made by pushing a tag `v<version>` matching the workspace version in `Cargo.toml`; [release.yml](.github/workflows/release.yml) builds and publishes it.
 
 | Command | Does |
 |---|---|
