@@ -29,6 +29,7 @@ Usage:
   legible lint <schema.yaml|.json> [schema options]
   legible check-compat <old> <new> [schema options]
   legible validate -s <schema>... <record.json>... [schema options]
+  legible record hash <record.json>...
   legible bundle pack <file|dir>... -o <bundle> [-s <schema>]... [--set <kind>]... [--no-sets] [encryption]
   legible bundle unpack <bundle> -d <dir> [-s <schema>]... [-i <identity>] [trust]
   legible bundle verify <bundle> [-s <schema>]... [-i <identity>] [trust]
@@ -113,6 +114,8 @@ async function main(argv) {
       await validate(values.schema.map((s) => loadSchema(s, values)), positionals);
       return;
     }
+    case "record":
+      return record(rest);
     case "bundle":
       return bundle(rest);
     case "keys":
@@ -224,6 +227,26 @@ async function bundle([action, ...rest]) {
     default:
       throw new Failed(`unknown bundle command ${action ?? ""}; use pack, unpack, verify or sign`);
   }
+}
+
+// Prints each record's content hash, the SHA-256 of its canonical line without
+// produced_by and source: what an external reference's sha256 pins. A record
+// with no canonical form is a problem, and the others are still hashed.
+function record([action, ...rest]) {
+  if (action !== "hash") throw new Failed(`unknown record command ${action ?? ""}; use hash`);
+  const { positionals: files } = parse(rest, {}, -1);
+  if (!files.length) throw new Failed("record hash needs at least one record");
+  let clean = true;
+  for (const file of files) {
+    const text = readInput(file);
+    try {
+      console.log(`${legible.recordHash(text)}  ${file}`);
+    } catch (e) {
+      console.error(`${file}: ${message(e)}`);
+      clean = false;
+    }
+  }
+  if (!clean) throw new Problems();
 }
 
 async function keys([action, ...rest]) {

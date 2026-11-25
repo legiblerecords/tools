@@ -10,7 +10,7 @@ Status: early, not yet published.
 npx @legiblerecords/legible@0.1.0 --help
 ```
 
-It has the Rust tool's commands (`expand`, `generate`, `lint`, `check-compat`, `validate`, and `bundle pack`, `verify`, `unpack` and `sign`, and `keys new`), and encrypts bundles for sending over email and other transports you don't trust:
+It has the Rust tool's commands for writing and checking records (`expand`, `generate`, `lint`, `check-compat`, `validate` and `record hash`, `bundle pack`, `verify`, `unpack` and `sign`, and `keys new`), and encrypts bundles for sending over email and other transports you don't trust:
 
 ```sh
 # A new passphrase, printed to stderr: send it by a different channel than the bundle.
@@ -81,6 +81,8 @@ const result = expand(text, "risk-appetite", { base: "https://monorail.tech/sche
 | `new BundleBuilder()` | `.add(name, bytes)` each file (a `.ndjson` file is a record set and is kept as it is), optionally `.setKinds([kind, …])` or `.noSets()` (by default a kind with more than 1,000 records (across its versions) becomes a record set), then `.finish(schemas?, producedBy?)`, which returns a `PackedBundle` with `.zip()`, `.manifest()` and `.attachments()`, or throws with every problem, one per line |
 | `Bundle.open(bytes)` | a `Bundle`, with `.manifest()`, `.manifestBytes()` and `.signature()` (as stored; `undefined` when unsigned), `.paths()`, `.file(path)` and `.verify(schemas?, nowMillis?)` → `{ problems, uncheckedTypes }` (a `published_at` more than 24 hours after `nowMillis`, default `Date.now()`, is a problem); throws for an unsafe, repeated or oversized zip entry |
 | `bundle.recordSets()` | `[{ path, recordType, recordVersion, count }]` for the bundle's record sets (`records/<kind>.ndjson`) |
+| `recordHash(text)` | a record's content hash, the SHA-256 of its canonical line without `produced_by` and `source`, in lowercase hex: what an external reference's `sha256` pins. Takes the record's text as a `Uint8Array`, not a parsed object, because `JSON.parse` quietly keeps the last of a repeated key and rounds large integers; throws for a record with no canonical form |
+| `contentLine(text)` | the content line itself, as a `Uint8Array` with no final newline, from the record's text as `recordHash` takes it; throws as it does |
 | `recordSet(bytes, { recordType, recordVersion, count, sha256 })` | a record set's records, after checking every line, the count and the hash; throws with the first problem, naming its line |
 | `bundle.verifySignature({ pins?, keySets?, expectedPublisher? })` | `{ status: "verified", publisher, key }` or `{ status: "unverified" }`. `pins` are `[{ publisher, id, alg?, publicKey }]` (canonical base64url), `keySets` are `Uint8Array`s of a publisher's keys.json as stored. Throws an `Error` whose `message` is the outcome code, such as `unknown_key` or `bad_signature` |
 | `parsePin(text)` | `{ publisher, id, alg, publicKey }` from `<publisher>/<id>=<public_key>`, as `--pin` takes it; throws with what is wrong |

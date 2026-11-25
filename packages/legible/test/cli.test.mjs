@@ -312,3 +312,44 @@ test("pack --set writes a record set, --no-sets writes files, and both together 
   const both = run(dir, ["bundle", "pack", "in", "--set", "alert", "--no-sets", "-o", "x.zip"]);
   assert.equal(both.status, 2, both.stderr);
 });
+
+test("record hash prints each record's content hash, as the Rust tool does", () => {
+  const dir = mkdtempSync(join(tmpdir(), "legible-hash-"));
+  // The spec's "plain" content-line case, with provenance that doesn't count.
+  writeFileSync(
+    join(dir, "policy.json"),
+    JSON.stringify(
+      {
+        $type: "tech.monorail.policy.document",
+        version: 1,
+        id: "access-control",
+        title: "Access control",
+        revision: 3,
+        effective_date: "2026-11-01",
+        status: "published",
+        body: "# Access control\n\nEveryone uses MFA.",
+        produced_by: { app: "outpost" },
+      },
+      null,
+      2,
+    ) + "\n",
+  );
+  const ok = run(dir, ["record", "hash", "policy.json"]);
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.match(ok.stdout, /^55d39db55254[0-9a-f]{52} {2}policy\.json\n$/);
+
+  writeFileSync(join(dir, "list.json"), "[1, 2]\n");
+  writeFileSync(join(dir, "dupes.json"), '{"id": "a", "id": "b"}');
+  const bad = run(dir, ["record", "hash", "policy.json", "list.json", "dupes.json"]);
+  assert.equal(bad.status, 1);
+  assert.match(bad.stdout, /^55d39db55254/, "good files are still hashed");
+  assert.match(bad.stderr, /list\.json: .*not a JSON object/);
+  assert.match(bad.stderr, /dupes\.json: .*twice/);
+
+  const missing = run(dir, ["record", "hash", "nope.json"]);
+  assert.equal(missing.status, 2);
+  assert.match(missing.stderr, /nope\.json/);
+
+  const none = run(dir, ["record", "hash"]);
+  assert.equal(none.status, 2);
+});

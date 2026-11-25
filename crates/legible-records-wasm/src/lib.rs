@@ -266,6 +266,26 @@ pub fn record_set(bytes: &[u8], expect: JsValue) -> Result<JsValue, JsError> {
     to_js(&records)
 }
 
+/// A record's content line (spec/records.md § Content lines): its canonical
+/// line without the top-level `produced_by` and `source`, and without the
+/// final newline. Takes the record's text, not a parsed object, so that a
+/// key that appears twice or an integer a double can't hold is refused
+/// rather than quietly changed by `JSON.parse`. Throws with the reason.
+#[wasm_bindgen(js_name = contentLine)]
+pub fn content_line(text: &[u8]) -> Result<Vec<u8>, JsError> {
+    let record = legible_records::record::parse(text).map_err(|e| JsError::new(&e))?;
+    Ok(legible_records::record::content_line(&record))
+}
+
+/// A record's content hash: the SHA-256 of its content line, in lowercase
+/// hex. What an external reference's `sha256` pins. Takes the record's text,
+/// as `contentLine` does, and throws with the reason it has no canonical form.
+#[wasm_bindgen(js_name = recordHash)]
+pub fn record_hash(text: &[u8]) -> Result<String, JsError> {
+    let record = legible_records::record::parse(text).map_err(|e| JsError::new(&e))?;
+    Ok(legible_records::record::content_sha256(&record))
+}
+
 /// Builds a bundle: `add` each file, then `finish`. A `.json` file with
 /// `$type` and `version` becomes a record; anything else an attachment.
 #[wasm_bindgen]

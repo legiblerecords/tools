@@ -169,3 +169,26 @@ test("record sets: recordSet and Bundle.recordSets", () => {
   );
   bad.free();
 });
+
+test("content-lines.json: contentLine and recordHash", () => {
+  const file = JSON.parse(
+    readFileSync(new URL("../../../crates/legible-records/tests/vectors/content-lines.json", import.meta.url)),
+  );
+  const failures = [];
+  for (const c of file.cases) {
+    // The record's text, as a file would hold it: whitespace and key order don't count.
+    const text = new TextEncoder().encode(JSON.stringify(c.record, null, 2) + "\n");
+    const line = new TextDecoder().decode(legible.contentLine(text));
+    if (line !== c.content_line) failures.push(`${c.name}: line ${JSON.stringify(line)}`);
+    const hash = legible.recordHash(text);
+    if (hash !== c.sha256) failures.push(`${c.name}: hash ${hash}, expected ${c.sha256}`);
+  }
+  assert.deepEqual(failures, []);
+  assert.ok(file.refused.length >= 5);
+  for (const c of file.refused) {
+    // Each is refused from its exact text, which JSON.parse would quietly change.
+    const text = new TextEncoder().encode(c.record_text);
+    assert.throws(() => legible.recordHash(text), Error, `${c.name} was accepted by recordHash`);
+    assert.throws(() => legible.contentLine(text), Error, `${c.name} was accepted by contentLine`);
+  }
+});
