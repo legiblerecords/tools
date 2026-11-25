@@ -11,7 +11,7 @@ Legible Records are security records as plain JSON: each file names its `$type` 
 
 | What | Where |
 |---|---|
-| The `legible` tool | `cargo install --git https://github.com/legiblerecords/tools legible` (Rust). Or `npx @legiblerecords/legible@0.1.0`, which has the schema and bundle commands and age encryption, but no `record hash` or feeds. |
+| The `legible` tool | `cargo install --git https://github.com/legiblerecords/tools legible` (Rust). Or `npx @legiblerecords/legible@0.1.0`, which has the schema, record and bundle commands, including `record hash`, and age encryption, but no feeds. |
 | The docs, for models | `https://legiblerecords.org/llms.txt` lists every page as Markdown; `/llms-full.txt` is all of it in one file. |
 | The spec | `https://legiblerecords.org/spec/records.md` and the other pages under Specification in `llms.txt`. The test vectors are in `https://github.com/legiblerecords/spec`, under `vectors/`. The spec is normative: where a guide differs, the spec is right. |
 | Monorail's types | `https://github.com/Monorail-Tech/track-legible-records`, `schemas/<type>/v<n>.yaml`, and the docs' Monorail types page. |
