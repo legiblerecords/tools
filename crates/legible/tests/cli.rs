@@ -2349,3 +2349,60 @@ fn pack_set_for_an_unknown_kind_exits_1() {
         "{packed:?}"
     );
 }
+
+#[test]
+fn record_hash_prints_sha256() {
+    let dir = Temp::new("record-hash");
+    let file = dir.path("policy.json");
+    // The spec's "plain" content-line case, with provenance that doesn't count.
+    std::fs::write(
+        &file,
+        r##"{
+  "$type": "tech.monorail.policy.document",
+  "version": 1,
+  "id": "access-control",
+  "title": "Access control",
+  "revision": 3,
+  "effective_date": "2026-11-01",
+  "status": "published",
+  "body": "# Access control\n\nEveryone uses MFA.",
+  "produced_by": {"app": "outpost"}
+}
+"##,
+    )
+    .unwrap();
+    let out = legible(&[arg("record"), arg("hash"), &file]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.starts_with("55d39db55254"),
+        "unexpected output {stdout}"
+    );
+    assert!(stdout
+        .trim_end()
+        .ends_with(&format!("  {}", file.display())));
+}
+
+#[test]
+fn record_hash_refuses_non_object() {
+    let dir = Temp::new("record-hash-array");
+    let file = dir.path("list.json");
+    std::fs::write(&file, "[1, 2]\n").unwrap();
+    let out = legible(&[arg("record"), arg("hash"), &file]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("not a JSON object"));
+}
+
+#[test]
+fn record_hash_refuses_duplicate_keys() {
+    let dir = Temp::new("record-hash-dupes");
+    let file = dir.path("dupes.json");
+    std::fs::write(&file, r#"{"id": "a", "id": "b"}"#).unwrap();
+    let out = legible(&[arg("record"), arg("hash"), &file]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("twice"));
+}

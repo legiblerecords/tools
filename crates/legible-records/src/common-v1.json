@@ -40,11 +40,87 @@
       "format": "email",
       "type": "string"
     },
+    "externalRef": {
+      "description": "A record that travels elsewhere - in another stream, or from another publisher. Never resolved inside a bundle.",
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/slug",
+          "description": "The record's id."
+        },
+        "publisher": {
+          "$ref": "#/$defs/domain",
+          "description": "Whose record it is. Left out only when it is this record's own publisher's and this record travels where that publisher is known - a signed bundle or a feed."
+        },
+        "revision": {
+          "description": "The record's revision, for types that number their revisions (such as a policy).",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256",
+          "description": "Of the record's content line, pinning exactly what it says."
+        },
+        "type": {
+          "description": "The record's $type, a type identifier such as tech.monorail.policy.document, not its short name.",
+          "pattern": "^[a-z0-9-]+(\\.[a-z0-9-]+)+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "type"
+      ],
+      "type": "object"
+    },
     "feedId": {
       "description": "A feed's id, <publisher>/<slug>, a domain and a slug. At most 317 characters; a reader also checks that the publisher part is a domain.",
       "maxLength": 317,
       "pattern": "^([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+([0-9]*[a-z]([a-z0-9-]*[a-z0-9])?|[0-9]+-[a-z0-9-]*[a-z0-9])\\/[a-z0-9]+(-[a-z0-9]+)*$",
       "type": "string"
+    },
+    "identifier": {
+      "description": "Something's id in one system, such as a repository in GitHub or a person in Okta. Matched exactly, both halves together.",
+      "properties": {
+        "id": {
+          "description": "The id in that system, as that system writes it - acme/api, 00u1ab2cd3.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "system": {
+          "description": "Where the id comes from, in lowercase - github, gitlab, okta, entra, google, slack, serial, outpost:acme.example. Each system names one kind of id (records.md § Pointing at records elsewhere).",
+          "pattern": "^[a-z0-9][a-z0-9.:-]*$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "system"
+      ],
+      "type": "object"
+    },
+    "personMatch": {
+      "description": "What a publisher knows about the person a record is about, for a reader to match against the people it holds. Needs emails or identifiers, or both.",
+      "properties": {
+        "emails": {
+          "description": "Compared case-insensitively.",
+          "items": {
+            "$ref": "#/$defs/email"
+          },
+          "type": "array"
+        },
+        "identifiers": {
+          "description": "The person's ids in other systems, matched before emails.",
+          "items": {
+            "$ref": "#/$defs/identifier"
+          },
+          "type": "array"
+        },
+        "name": {
+          "description": "For people to read when resolving a match; never matched on.",
+          "type": "string"
+        }
+      },
+      "type": "object"
     },
     "produced_by": {
       "description": "What wrote the file.",
