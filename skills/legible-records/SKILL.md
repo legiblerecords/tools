@@ -13,10 +13,16 @@ Legible Records are security records as plain JSON: each file names its `$type` 
 |---|---|
 | The `legible` tool | `cargo install --git https://github.com/legiblerecords/tools legible` (Rust). Or `npx @legiblerecords/legible@0.1.0`, which has the schema and bundle commands and age encryption, but no `record hash` or feeds. |
 | The docs, for models | `https://legiblerecords.org/llms.txt` lists every page as Markdown; `/llms-full.txt` is all of it in one file. |
-| The spec | `https://github.com/legiblerecords/spec`. It is normative: where the docs differ, the spec is right. |
+| The spec | `https://legiblerecords.org/spec/records.md` and the other pages under Specification in `llms.txt`. The test vectors are in `https://github.com/legiblerecords/spec`, under `vectors/`. The spec is normative: where a guide differs, the spec is right. |
 | Monorail's types | `https://github.com/Monorail-Tech/track-legible-records`, `schemas/<type>/v<n>.yaml`, and the docs' Monorail types page. |
 
 If `legible` is already on your path or you were given a binary, use that: check it with `legible --version`. If you can't get the tool, stop and say what's missing. Don't write `manifest.json`, hashes, record sets or signatures by hand: the bytes must be canonical, and a bundle that is nearly right is refused.
+
+## Using it or implementing it
+
+This skill is for **using** Legible Records: writing records, packing and checking bundles, and running `legible`. To **implement** any part of it in your own code, such as a bundle reader, a signature or key-set check, a schema expander or a port of the tools, follow the spec, not this skill or the guides, and pass the spec's test vectors for that part. A summary leaves out exactly the cases an implementation gets wrong.
+
+To read a feed, run `legible feed pull` (or `feed check`), or use the Rust library it is built on. Don't write a feed reader of your own: it decides what to trust, and the spec's [§ Reading a feed](https://legiblerecords.org/spec/feeds.md#reading-a-feed) and [§ Trust](https://legiblerecords.org/spec/feeds.md#trust) are long because an attacker who controls the storage or the publisher's server gets many chances.
 
 ## The workflow
 
