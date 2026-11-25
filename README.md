@@ -14,9 +14,23 @@ Status: early. Nothing here is released yet.
 
 ## The command-line tool
 
+Download a build for your platform from the [releases](https://github.com/legiblerecords/tools/releases): static Linux (x86_64, aarch64), macOS (Apple silicon, Intel) and Windows (x86_64), with `SHA256SUMS` and build provenance. For example, on Linux x86_64:
+
+```sh
+curl -fsSLO https://github.com/legiblerecords/tools/releases/latest/download/legible-x86_64-unknown-linux-musl.tar.gz
+curl -fsSL https://github.com/legiblerecords/tools/releases/latest/download/SHA256SUMS | sha256sum -c --ignore-missing
+tar -xzf legible-x86_64-unknown-linux-musl.tar.gz && ./legible-x86_64-unknown-linux-musl/legible --version
+```
+
+The other archives are `legible-aarch64-unknown-linux-musl.tar.gz`, `legible-aarch64-apple-darwin.tar.gz`, `legible-x86_64-apple-darwin.tar.gz` and `legible-x86_64-pc-windows-msvc.zip`. `gh attestation verify <archive> --repo legiblerecords/tools` checks that an archive was built by this repository's release workflow.
+
+Or build it from source, with Rust 1.89 or later:
+
 ```sh
 cargo install --git https://github.com/legiblerecords/tools legible
 ```
+
+A release is made by pushing a tag `v<version>` matching the workspace version in `Cargo.toml`; [release.yml](.github/workflows/release.yml) builds and publishes it.
 
 | Command | Does |
 |---|---|
@@ -120,6 +134,8 @@ ACME_FEED_TOKEN=... legible feed pull connection.json --state ~/.legible/state -
 ```
 
 Both fetch the publisher's key set from `https://<publisher>/.well-known/legible-records/` on every poll, before the index, so a rotation or a revocation reaches them even when `feed.json` hasn't changed. A key the connection file pins whose public key the publisher's key set lists under another id isn't trusted: what names the pinned id is `unknown_key` until the connection file is fixed. They print one line per stream: `<id>: accepted (verified <publisher> <key>)`, `accepted (unverified)`, `unchanged`, `withdrawn`, the outcome code of a refusal (such as `replay`, `bad_signature`, or `revoked_key` for a stream cleared because the held key set revoked the key that signed it, or for a bundle or index signed by a revoked key), or `failed: <message>`. A refused index prints `index: <code>`, and for `bad_feed` the reason on stderr. A refused key set prints `keys: <code>` (`bad_key_set`, `key_set_rollback` or `bad_endorsement`). A publisher's key set can add a key nobody endorsed; the key is not trusted until you approve it: the poll prints `keys: needs_approval` and `pending key: --approve <publisher>/<id>=<public_key>`. Give that argument (repeatable) to the next `feed pull`, which keeps it in the state.
+
+In the library (feature `net`), `HttpsKeySource::loopback(origin)` reads every publisher's key set from a loopback `origin` such as `http://127.0.0.1:8080` instead of `https://<publisher>`. It is for a reader on the publisher's own machine, such as an outpost's collector reading the key set from the node's own server while it pins the signer's key; any non-loopback origin is an error. It was `with_base`, which stays as a deprecated alias.
 
 `feed check` is stateless: nothing is written, its only anchors are the connection file's pins, and the history checks (`replay`, `stale_feed`) need a state, so use it to see whether a feed and its signatures are good, not as a reader. `feed pull` keeps `<state>/<feed id with / as __>.json`, written by temporary file and rename and only when something changed. A refused or unreadable index leaves the rest of it untouched, but the key steps run on every poll: an accepted key set is kept, and streams a key revoked by the held key set signed are cleared, whatever happens to the index. A cleared stream loses its hash and signer, so it is fetched and checked again next poll, but keeps its `published_at`, and the index keeps its `updated_at`: they stay as replay floors, so a revocation never lets old signed content back in. A revocation in a key set that isn't held (one waiting for approval, or refused as `bad_endorsement` or `key_set_rollback`) refuses what that key signed on that poll, and changes nothing in the state, since anyone who controls the publisher's server can serve one. The state records who signed each stream's bundle and the index; a state file from an earlier version, without them, is still read, as if everything in it was unsigned, so a revocation clears those streams only once they have been accepted again. The state holds what the spec's reader state does, and the index's ETag, so an unchanged feed costs one request. Bundles are written decrypted, exactly as stored, as `<out>/<stream>/<published_at with : as ->-<first 12 hex of the bundle's SHA-256>.zip` (so two different bundles never share a name), and a different file already there is never overwritten.
 

@@ -756,18 +756,18 @@ fn key_source_fetches_set_and_sig() {
     let set = key_set_bytes(&[&key_a()]);
     let sig = sign(&key_a(), Context::Keys, &set).to_bytes();
     let server = key_server(Reply::ok(set.clone()), Reply::ok(sig.clone()));
-    let mut keys = HttpsKeySource::with_base(&server.origin).unwrap();
+    let mut keys = HttpsKeySource::loopback(&server.origin).unwrap();
     assert_eq!(
         keys.key_set("acme.example").unwrap(),
         Some((set.clone(), Some(sig)))
     );
 
     let server = key_server(Reply::ok(set.clone()), Reply::status(404));
-    let mut keys = HttpsKeySource::with_base(&server.origin).unwrap();
+    let mut keys = HttpsKeySource::loopback(&server.origin).unwrap();
     assert_eq!(keys.key_set("acme.example").unwrap(), Some((set, None)));
 
     let server = key_server(Reply::status(404), Reply::status(404));
-    let mut keys = HttpsKeySource::with_base(&server.origin).unwrap();
+    let mut keys = HttpsKeySource::loopback(&server.origin).unwrap();
     assert_eq!(keys.key_set("acme.example").unwrap(), None);
     assert_eq!(
         server.count("GET", "/.well-known/legible-records/keys.sig"),
@@ -775,12 +775,12 @@ fn key_source_fetches_set_and_sig() {
     );
 
     // Not a domain: refused before anything is fetched.
-    let mut keys = HttpsKeySource::with_base(&server.origin).unwrap();
+    let mut keys = HttpsKeySource::loopback(&server.origin).unwrap();
     assert!(keys.key_set("acme.example/evil?").is_err());
 
     let big = vec![b' '; MAX_INDEX_BYTES as usize + 1];
     let server = key_server(Reply::ok(big), Reply::status(404));
-    let mut keys = HttpsKeySource::with_base(&server.origin).unwrap();
+    let mut keys = HttpsKeySource::loopback(&server.origin).unwrap();
     assert!(keys.key_set("acme.example").is_err());
 }
 
@@ -799,7 +799,7 @@ fn key_set_unreachable_uses_cache() {
         .key_sets
         .insert("acme.example".to_owned(), held.clone());
     let mut src = source(&conn, &no_env).unwrap();
-    let mut keys = HttpsKeySource::with_base(&keys_server.origin).unwrap();
+    let mut keys = HttpsKeySource::loopback(&keys_server.origin).unwrap();
     let report = run(&mut *src, &mut keys, &conn, Some(&mut state), None);
     assert_eq!(report.index, IndexOutcome::Accepted, "{report:?}");
     assert_eq!(report.streams["notes"], StreamOutcome::Accepted);
@@ -826,7 +826,7 @@ fn key_set_unreachable_with_nothing_else_fails_the_poll() {
         let conn = https_connection(&feed, json!({"method": "none"}));
         let mut state = ReaderState::default();
         let mut src = source(&conn, &no_env).unwrap();
-        let mut keys = HttpsKeySource::with_base(&keys_server.origin).unwrap();
+        let mut keys = HttpsKeySource::loopback(&keys_server.origin).unwrap();
         let report = run(&mut *src, &mut keys, &conn, Some(&mut state), None);
         assert!(
             matches!(&report.index, IndexOutcome::Failed(e) if e.contains("key set")),
@@ -861,7 +861,7 @@ fn key_set_unreachable_with_a_pin_checks_with_the_pin() {
         public_key: a.public().key,
     }];
     let mut src = source(&conn, &no_env).unwrap();
-    let mut keys = HttpsKeySource::with_base(&keys_server.origin).unwrap();
+    let mut keys = HttpsKeySource::loopback(&keys_server.origin).unwrap();
     let report = run(&mut *src, &mut keys, &conn, None, None);
     assert_eq!(report.index, IndexOutcome::Accepted, "{report:?}");
     assert_eq!(report.streams["notes"], StreamOutcome::Accepted);
@@ -954,7 +954,7 @@ fn s3_403_says_the_key_may_not_list() {
 
 #[test]
 fn key_source_origin_must_be_a_url() {
-    assert!(HttpsKeySource::with_base("not a url").is_err());
+    assert!(HttpsKeySource::loopback("not a url").is_err());
 }
 
 #[test]
@@ -1079,4 +1079,10 @@ fn s3_prefix_slash_normalized() {
             report.etag
         );
     }
+}
+
+#[test]
+fn loopback_key_source_refuses_non_loopback() {
+    assert!(HttpsKeySource::loopback("http://example.com").is_err());
+    assert!(HttpsKeySource::loopback("http://127.0.0.1:8080").is_ok());
 }

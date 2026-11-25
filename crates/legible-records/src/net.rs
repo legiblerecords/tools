@@ -562,11 +562,18 @@ impl HttpsKeySource {
         }
     }
 
-    /// For tests: reads every publisher's key set from `origin`, which must be
-    /// a loopback host (such as `http://127.0.0.1:8080`) instead of the publisher's own domain:
-    /// `<origin>/.well-known/legible-records/keys.json`.
-    #[doc(hidden)]
-    pub fn with_base(origin: &str) -> Result<HttpsKeySource, String> {
+    /// Reads every publisher's key set from `origin` instead of from the
+    /// publisher's own domain: `<origin>/.well-known/legible-records/keys.json`
+    /// and `keys.sig`.
+    ///
+    /// This is for a reader on the publisher's own machine, such as a
+    /// collector on an outpost node that reads the key set from the node's own
+    /// server on loopback (`http://127.0.0.1:8080`) while it pins the signer's
+    /// key. `origin` must be a loopback host (`127.0.0.1`, `[::1]` or
+    /// `localhost`), so that nothing but the machine itself can stand in for a
+    /// publisher's domain; any other host is an `Err`. Loopback is reached
+    /// directly, never through a proxy, and over plain `http`.
+    pub fn loopback(origin: &str) -> Result<HttpsKeySource, String> {
         let parsed =
             url::Url::parse(origin).map_err(|e| format!("key source origin: not a URL: {e}"))?;
         if !parsed.host_str().is_some_and(is_loopback) {
@@ -580,6 +587,12 @@ impl HttpsKeySource {
             agent: agent(&origin).map_err(|e| format!("key source origin: {e}"))?,
             origin: Some(origin),
         })
+    }
+
+    /// The former name of [`HttpsKeySource::loopback`].
+    #[deprecated(note = "renamed to `HttpsKeySource::loopback`")]
+    pub fn with_base(origin: &str) -> Result<HttpsKeySource, String> {
+        HttpsKeySource::loopback(origin)
     }
 
     fn file(&self, base: &str, name: &str) -> Result<Option<Vec<u8>>, String> {
