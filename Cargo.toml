@@ -16,7 +16,7 @@ yaml-rust2 = "0.13"
 jsonschema = { version = "=0.58.0", default-features = false }
 clap = { version = "4", features = ["derive"] }
 # Deflate only, in pure Rust (miniz_oxide), so the bundle code also builds for WebAssembly.
-zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "9.8", default-features = false, features = ["deflate-flate2"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 sha2 = "0.10"
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "fast", "zeroize", "rand_core"] }
