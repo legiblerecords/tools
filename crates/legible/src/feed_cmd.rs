@@ -737,7 +737,7 @@ fn key_source(origin: Option<&str>) -> Result<Box<dyn KeySource>, Stop> {
     Ok(match origin {
         None => Box::new(HttpsKeySource::new()),
         Some(origin) => Box::new(
-            HttpsKeySource::with_base(origin)
+            HttpsKeySource::loopback(origin)
                 .map_err(|e| Stop::Failed(format!("--key-origin: {e}")))?,
         ),
     })
