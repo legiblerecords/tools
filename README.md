@@ -30,7 +30,7 @@ Or build it from source, with Rust 1.89 or later:
 cargo install --git https://github.com/legiblerecords/tools legible
 ```
 
-A release is made by pushing a tag `v<version>` matching the workspace version in `Cargo.toml`; [release.yml](.github/workflows/release.yml) builds and publishes it.
+A release is made by pushing a tag `v<version>` matching the workspace version in `Cargo.toml` and the version in `packages/legible/package.json`; [release.yml](.github/workflows/release.yml) builds and publishes the GitHub release, then publishes `@legiblerecords/legible` to npm.
 
 | Command | Does |
 |---|---|
