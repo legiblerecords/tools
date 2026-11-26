@@ -1,9 +1,26 @@
 name: npm
 
+# Runs only when the package, the Rust code it's built from (and whose
+# vectors it tests against), or this workflow change; not for documentation,
+# the skill or other workflows. LICENSE is copied into the package.
 on:
   pull_request:
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "packages/legible/**"
+      - "LICENSE"
+      - ".github/workflows/npm.yml"
   push:
     branches: [main]
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "packages/legible/**"
+      - "LICENSE"
+      - ".github/workflows/npm.yml"
 
 permissions:
   contents: read
