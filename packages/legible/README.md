@@ -2,7 +2,7 @@
 
 [Legible Records](https://github.com/legiblerecords/spec) in JavaScript: expand short-form schemas to JSON Schema and generate them back, lint published types, check that a new version of a type is compatible with the last, and pack and verify bundles. It's the same Rust code as the `legible` command-line tool, compiled to WebAssembly, and it comes with that tool for Node, which can also encrypt bundles with [age](https://age-encryption.org).
 
-Status: early, not yet published.
+Status: early. The API may change before 1.0.
 
 ## The command
 
