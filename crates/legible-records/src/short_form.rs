@@ -2,6 +2,7 @@
 //! restricted YAML that expand to JSON Schema 2020-12, and the canonical
 //! short form generated back from a schema.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -9,17 +10,22 @@ use serde_json::{json, Map, Number, Value};
 
 use crate::yaml::{emit_string, is_json_number, parse_restricted_with_lines};
 
+mod rules;
+
+pub use rules::{rule_kind, rule_member};
+
 pub const DRAFT: &str = "https://json-schema.org/draft/2020-12/schema";
 const PRIMITIVES: [&str; 6] = ["string", "integer", "number", "boolean", "object", "null"];
 const RESERVED: [&str; 9] = [
     "string", "integer", "number", "boolean", "object", "null", "ref", "enum", "known",
 ];
-const DOC_KEYS: [&str; 8] = [
+const DOC_KEYS: [&str; 9] = [
     "type",
     "version",
     "title",
     "description",
     "fields",
+    "rules",
     "defs",
     "examples",
     "json",
@@ -89,7 +95,15 @@ pub fn is_type_identifier(text: &str) -> bool {
                     .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
         })
 }
-const FIELD_KEYS: [&str; 6] = ["description", "type", "fields", "items", "examples", "json"];
+const FIELD_KEYS: [&str; 7] = [
+    "description",
+    "type",
+    "fields",
+    "rules",
+    "items",
+    "examples",
+    "json",
+];
 const MAX_DEPTH: usize = 32;
 
 /// One problem in a short-form file: its line, the path in the short form
@@ -156,10 +170,16 @@ pub fn generate(body: &Value, name: &str, options: &Options) -> Result<String, S
         Some(title) if published && is_schema_name(title) => title,
         _ => name,
     };
+    let empty = Map::new();
+    let defs = object
+        .get("$defs")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
     let generator = Generator {
         own,
         options,
         published,
+        defs,
     };
     let doc = generator.document(object);
     Ok(emit_document(&doc))
@@ -175,6 +195,9 @@ struct Expander<'a> {
     lines: Option<&'a BTreeMap<String, usize>>,
     options: &'a Options,
     published: bool,
+    /// The schema's `$defs`, expanded, for rule paths that step through a
+    /// local ref.
+    defs: Cow<'a, Map<String, Value>>,
     problems: Vec<Problem>,
 }
 
@@ -221,6 +244,7 @@ impl<'a> Expander<'a> {
             lines,
             options,
             published: false,
+            defs: Cow::Owned(Map::new()),
             problems: Vec::new(),
         }
     }
@@ -273,9 +297,23 @@ impl<'a> Expander<'a> {
                 }
             }
         }
+        if let Some(Value::Object(defs)) = doc.get("defs") {
+            // Rule paths may step through local refs, before `defs` are
+            // expanded below: expand them once here, for looking up only.
+            let mut lookup = Expander::new(self.own, None, self.options);
+            lookup.title = self.title.clone();
+            lookup.published = self.published;
+            let defs = defs
+                .iter()
+                .map(|(name, value)| (name.clone(), lookup.field_value(value, &root, 0)))
+                .collect();
+            self.defs = Cow::Owned(defs);
+        }
         if let Some(fields) = doc.get("fields") {
             self.object_of(fields, &root.key("fields"), 0, &mut node);
         }
+        // Before the published type's own properties, which no rule names.
+        self.rules(doc, &root, false, &mut node);
         if let Some((kind, version, id)) = published {
             node.insert("$id".to_owned(), json!(id));
             node.insert("type".to_owned(), json!("object"));
@@ -321,7 +359,7 @@ impl<'a> Expander<'a> {
                 None => self.problem(&loc, "must be a list of rows"),
             }
         }
-        self.merge_json(&mut node, doc.get("json"), &root);
+        self.merge_json(&mut node, doc, &root);
         node.entry("$schema")
             .or_insert_with(|| Value::String(DRAFT.to_owned()));
         Value::Object(node)
@@ -382,15 +420,25 @@ impl<'a> Expander<'a> {
         Some((kind, version, id))
     }
 
-    fn merge_json(&mut self, node: &mut Map<String, Value>, json: Option<&Value>, loc: &Loc) {
-        let Some(json) = json else { return };
+    /// Merges a mapping's `json` into its node.
+    fn merge_json(
+        &mut self,
+        node: &mut Map<String, Value>,
+        mapping: &Map<String, Value>,
+        loc: &Loc,
+    ) {
+        let Some(json) = mapping.get("json") else {
+            return;
+        };
         let loc = loc.key("json");
         let Some(json) = json.as_object() else {
             self.problem(&loc, "must be a mapping");
             return;
         };
         for (key, value) in json {
-            if node.contains_key(key) {
+            if key == "allOf" && mapping.contains_key("rules") {
+                self.problem(&loc.key(key), "json sets allOf beside rules");
+            } else if node.contains_key(key) {
                 self.problem(&loc.key(key), format!("{key} is already set"));
             } else {
                 node.insert(key.clone(), value.clone());
@@ -550,7 +598,9 @@ impl<'a> Expander<'a> {
                 self.problem(&loc.key("examples"), "must be a list");
             }
         }
-        self.merge_json(&mut node, mapping.get("json"), loc);
+        let nullable = mapping.get("type") == Some(&json!("object?"));
+        self.rules(mapping, loc, nullable, &mut node);
+        self.merge_json(&mut node, mapping, loc);
         Value::Object(node)
     }
 
@@ -1030,6 +1080,8 @@ struct Generator<'a> {
     own: &'a str,
     options: &'a Options,
     published: bool,
+    /// The body's `$defs`, for rule paths that step through a local ref.
+    defs: &'a Map<String, Value>,
 }
 
 /// A published type's identifier and version, when `body` is one under the
@@ -1082,7 +1134,9 @@ const COVERED: [&str; 10] = [
 
 impl Generator<'_> {
     fn expander(&self) -> Expander<'_> {
-        Expander::new(self.own, None, self.options)
+        let mut expander = Expander::new(self.own, None, self.options);
+        expander.defs = Cow::Borrowed(self.defs);
+        expander
     }
 
     fn expands_to(&self, value: &Value, node: &Map<String, Value>) -> bool {
@@ -1133,6 +1187,10 @@ impl Generator<'_> {
         }
         if let Some(fields) = self.fields_of(&rest, false) {
             doc.insert("fields".to_owned(), Value::Object(fields));
+            if let Some(rules) = self.rules_beside(&rest) {
+                doc.insert("rules".to_owned(), Value::Array(rules));
+                rest.remove("allOf");
+            }
             for key in ["type", "properties", "required"] {
                 rest.remove(key);
             }
@@ -1288,7 +1346,12 @@ impl Generator<'_> {
             for key in ["type", "properties", "required"] {
                 json.remove(key);
             }
-            candidates.push(mapping(kind, vec![("fields", Value::Object(fields))], json));
+            let mut extra = vec![("fields", Value::Object(fields))];
+            if let Some(rules) = self.rules_beside(&rest) {
+                extra.push(("rules", Value::Array(rules)));
+                json.remove("allOf");
+            }
+            candidates.push(mapping(kind, extra, json));
         }
         let (covered, uncovered): (Map<String, Value>, Map<String, Value>) = rest
             .clone()
@@ -1318,21 +1381,24 @@ impl Generator<'_> {
     /// `known(…)` for a property of a published type that is exactly a
     /// string (or nullable string) with string examples.
     fn known(&self, node: &Map<String, Value>, examples: Option<&Value>) -> Option<String> {
-        if !self.published || node.len() != 1 {
+        if !self.published {
             return None;
         }
-        let nullable = match node.get("type")? {
-            Value::String(kind) if kind == "string" => false,
-            kind if *kind == json!(["string", "null"]) => true,
-            _ => return None,
-        };
-        let values = examples?.as_array()?;
-        if values.is_empty() || !values.iter().all(Value::is_string) {
+        known_text(node, examples)
+    }
+
+    /// `rules` for an object node with `type: object` and an `allOf` that
+    /// is all rule members ([`Generator::rules_of`]).
+    fn rules_beside(&self, node: &Map<String, Value>) -> Option<Vec<Value>> {
+        if node.get("type") != Some(&json!("object")) {
             return None;
         }
-        let values = values.iter().map(enum_text).collect::<Option<Vec<_>>>()?;
-        let mark = if nullable { "?" } else { "" };
-        Some(format!("known({}){mark}", values.join(", ")))
+        let empty = Map::new();
+        let properties = node
+            .get("properties")
+            .and_then(Value::as_object)
+            .unwrap_or(&empty);
+        self.rules_of(node.get("allOf")?, properties)
     }
 
     fn expr(&self, node: &Map<String, Value>) -> Option<Text> {
@@ -1497,6 +1563,28 @@ impl Generator<'_> {
     }
 }
 
+/// `known(…)`, or `known(…)?`, for a node (without `description` and
+/// `examples`) that is exactly a string, or a nullable string, whose
+/// examples are strings. Generation writes it so only in a published type;
+/// a rule's `G(a)` takes such a field as not a plain string in any schema.
+fn known_text(node: &Map<String, Value>, examples: Option<&Value>) -> Option<String> {
+    if node.len() != 1 {
+        return None;
+    }
+    let nullable = match node.get("type")? {
+        Value::String(kind) if kind == "string" => false,
+        kind if *kind == json!(["string", "null"]) => true,
+        _ => return None,
+    };
+    let values = examples?.as_array()?;
+    if values.is_empty() || !values.iter().all(Value::is_string) {
+        return None;
+    }
+    let values = values.iter().map(enum_text).collect::<Option<Vec<_>>>()?;
+    let mark = if nullable { "?" } else { "" };
+    Some(format!("known({}){mark}", values.join(", ")))
+}
+
 fn enum_text(value: &Value) -> Option<String> {
     match value {
         Value::Number(number) => Some(number.to_string()),
@@ -1607,8 +1695,15 @@ fn emit_map(out: &mut String, map: &Map<String, Value>, order: &Order, indent: u
         } else {
             format!("{pad}{key_text}:")
         };
+        // A type's rules are a block list, one rule to a line.
+        let rules = key == "rules" && matches!(order, Order::Document(_) | Order::Field);
         let order = child(order, key);
         match value {
+            Value::Array(items) if rules && !items.is_empty() => {
+                out.push_str(&prefix);
+                out.push('\n');
+                emit_seq(out, items, &order, indent + 2);
+            }
             Value::Object(child) if !child.is_empty() => {
                 out.push_str(&prefix);
                 out.push('\n');

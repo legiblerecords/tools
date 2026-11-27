@@ -1,0 +1,1399 @@
+{
+ "cases": [
+  {
+   "name": "one-of-two",
+   "options": {
+    "common": "https://legiblerecords.org/schemas/org.legiblerecords.common/v1.json"
+   },
+   "records": [
+    {
+     "failures": [],
+     "record": {
+      "at": "2026-01-01T09:00:00Z"
+     }
+    },
+    {
+     "failures": [],
+     "record": {
+      "on": "2026-02-01"
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "needs exactly one of at and on",
+       "pointer": ""
+      }
+     ],
+     "record": {}
+    },
+    {
+     "failures": [
+      {
+       "message": "needs exactly one of at and on",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "at": "2026-01-01T09:00:00Z",
+      "on": "2026-02-01"
+     }
+    }
+   ],
+   "short": "fields:\n  at?: datetime\n  on?: date\nrules:\n  - one_of(at, on)\n"
+  },
+  {
+   "name": "one-of-three",
+   "records": [
+    {
+     "failures": [],
+     "record": {
+      "phone": "555 0100"
+     }
+    },
+    {
+     "failures": [],
+     "record": {
+      "email": "",
+      "phone": "555 0100"
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "needs exactly one of email, phone or post",
+       "pointer": ""
+      }
+     ],
+     "record": {}
+    },
+    {
+     "failures": [
+      {
+       "message": "needs exactly one of email, phone or post",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "email": "someone@example.com",
+      "post": "1 Example Road"
+     }
+    }
+   ],
+   "short": "fields:\n  email?: string\n  phone?: string\n  post?: string\nrules:\n  - one_of(email, phone, post)\n"
+  },
+  {
+   "name": "at-most-one",
+   "options": {
+    "common": "https://legiblerecords.org/schemas/org.legiblerecords.common/v1.json"
+   },
+   "records": [
+    {
+     "failures": [],
+     "record": {}
+    },
+    {
+     "failures": [],
+     "record": {
+      "requested_on": "2026-02-01"
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "requested_at and requested_on both given",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "requested_at": "2026-01-01T09:00:00Z",
+      "requested_on": "2026-02-01"
+     }
+    }
+   ],
+   "short": "fields:\n  requested_at?: datetime\n  requested_on?: date\nrules:\n  - at_most_one(requested_at, requested_on)\n"
+  },
+  {
+   "name": "any-of",
+   "records": [
+    {
+     "failures": [],
+     "record": {
+      "subject_refs": [
+       "ref-1"
+      ]
+     }
+    },
+    {
+     "failures": [],
+     "record": {
+      "scope": "every service",
+      "subjects": []
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "needs subjects, subject_refs or scope",
+       "pointer": ""
+      }
+     ],
+     "record": {}
+    },
+    {
+     "failures": [
+      {
+       "message": "needs subjects, subject_refs or scope",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "subjects": []
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "needs subjects, subject_refs or scope",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "scope": ""
+     }
+    }
+   ],
+   "short": "fields:\n  subjects?: string[]\n  subject_refs?: string[]\n  scope?: string\nrules:\n  - any_of(subjects, subject_refs, scope)\n"
+  },
+  {
+   "name": "given-by-type",
+   "records": [
+    {
+     "failures": [],
+     "record": {
+      "code": "",
+      "label": "first"
+     }
+    },
+    {
+     "failures": [],
+     "record": {
+      "label": ""
+     }
+    },
+    {
+     "failures": [],
+     "record": {
+      "code": "",
+      "label": ""
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "needs exactly one of code and label",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "code": ""
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "needs exactly one of code and label",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "code": "abc",
+      "label": ""
+     }
+    }
+   ],
+   "short": "fields:\n  code?: /^[a-z]*$/\n  label?: known(first, second)\nrules:\n  - one_of(code, label)\n"
+  },
+  {
+   "name": "requires-field",
+   "records": [
+    {
+     "failures": [],
+     "record": {}
+    },
+    {
+     "failures": [],
+     "record": {
+      "affected_file": "src/main.c"
+     }
+    },
+    {
+     "failures": [],
+     "record": {
+      "affected_file": "src/main.c",
+      "line": 3
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "line needs affected_file",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "line": 3
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "line needs affected_file",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "affected_file": "",
+      "line": 3
+     }
+    }
+   ],
+   "short": "fields:\n  line?: integer(1..)\n  affected_file?: string\nrules:\n  - requires(line, affected_file)\n"
+  },
+  {
+   "name": "requires-value",
+   "options": {
+    "common": "https://legiblerecords.org/schemas/org.legiblerecords.common/v1.json"
+   },
+   "records": [
+    {
+     "failures": [],
+     "record": {}
+    },
+    {
+     "failures": [],
+     "record": {
+      "status": "active"
+     }
+    },
+    {
+     "failures": [],
+     "record": {
+      "revoked_on": "2026-02-01",
+      "status": "revoked"
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "revoked_on only when revoked",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "revoked_on": "2026-02-01"
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "revoked needs revoked_on",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "status": "revoked"
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "revoked_on only when revoked",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "revoked_on": "2026-02-01",
+      "status": "active"
+     }
+    }
+   ],
+   "short": "fields:\n  status?: known(active, revoked)\n  revoked_on?: date\nrules:\n  - requires(status = revoked, revoked_on)\n  - requires(revoked_on, status = revoked)\n"
+  },
+  {
+   "name": "requires-in-and-not",
+   "records": [
+    {
+     "failures": [],
+     "record": {
+      "contact": "desk",
+      "kind": "person"
+     }
+    },
+    {
+     "failures": [],
+     "record": {
+      "kind": "service",
+      "owner": "ops"
+     }
+    },
+    {
+     "failures": [],
+     "record": {
+      "contact": "desk",
+      "kind": "shared",
+      "owner": "ops"
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "not service needs contact",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "kind": "person"
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "service or shared needs owner",
+       "pointer": ""
+      },
+      {
+       "message": "not service needs contact",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "kind": "shared"
+     }
+    }
+   ],
+   "short": "fields:\n  kind: known(person, service, shared)\n  owner?: string\n  contact?: string\nrules:\n  - requires(kind in (service, shared), owner)\n  - requires(not kind = service, contact)\n"
+  },
+  {
+   "name": "requires-any-of",
+   "options": {
+    "common": "https://legiblerecords.org/schemas/org.legiblerecords.common/v1.json"
+   },
+   "records": [
+    {
+     "failures": [],
+     "record": {
+      "status": "open"
+     }
+    },
+    {
+     "failures": [],
+     "record": {
+      "fixed_at": "2026-01-01T09:00:00Z",
+      "status": "fixed"
+     }
+    },
+    {
+     "failures": [],
+     "record": {
+      "fixed_on": "2026-02-01",
+      "status": "closed"
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "fixed needs fixed_at or fixed_on",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "status": "fixed"
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "fixed_on only when fixed or closed",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "fixed_on": "2026-02-01",
+      "status": "open"
+     }
+    }
+   ],
+   "short": "fields:\n  status: known(open, fixed, closed)\n  fixed_at?: datetime\n  fixed_on?: date\nrules:\n  - requires(status = fixed, any_of(fixed_at, fixed_on))\n  - requires(fixed_on, status in (fixed, closed))\n"
+  },
+  {
+   "name": "requires-not-in-any-of",
+   "records": [
+    {
+     "failures": [],
+     "record": {
+      "kind": "service"
+     }
+    },
+    {
+     "failures": [],
+     "record": {
+      "kind": "person",
+      "person_email": "someone@example.com"
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "not service or shared needs person_id or person_email",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "kind": "person"
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "not service or shared needs person_id or person_email",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "kind": "person",
+      "person_id": ""
+     }
+    }
+   ],
+   "short": "fields:\n  kind: known(person, service, shared)\n  person_id?: string\n  person_email?: string\nrules:\n  - requires(not kind in (service, shared), any_of(person_id, person_email))\n"
+  },
+  {
+   "name": "requires-value-needs-value",
+   "records": [
+    {
+     "failures": [],
+     "record": {
+      "status": "open"
+     }
+    },
+    {
+     "failures": [],
+     "record": {
+      "resolution": "dropped",
+      "status": "closed"
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "closed needs done or dropped",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "status": "closed"
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "closed needs done or dropped",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "resolution": "later",
+      "status": "closed"
+     }
+    }
+   ],
+   "short": "fields:\n  status: known(open, closed)\n  resolution?: known(done, dropped)\nrules:\n  - requires(status = closed, resolution in (done, dropped))\n"
+  },
+  {
+   "name": "before-dates",
+   "options": {
+    "common": "https://legiblerecords.org/schemas/org.legiblerecords.common/v1.json"
+   },
+   "records": [
+    {
+     "failures": [],
+     "record": {}
+    },
+    {
+     "failures": [],
+     "record": {
+      "original_due": "2026-03-01"
+     }
+    },
+    {
+     "failures": [],
+     "record": {
+      "expires": "2026-02-01",
+      "original_due": "2026-01-31"
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "original_due 2026-02-01 isn't before expires 2026-02-01",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "expires": "2026-02-01",
+      "original_due": "2026-02-01"
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "original_due 2026-03-01 isn't before expires 2026-02-01",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "expires": "2026-02-01",
+      "original_due": "2026-03-01"
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "original_due soon isn't before expires 2026-02-01",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "expires": "2026-02-01",
+      "original_due": "soon"
+     }
+    }
+   ],
+   "short": "fields:\n  original_due?: date\n  expires?: date\nrules:\n  - before(original_due, expires)\n"
+  },
+  {
+   "name": "before-datetimes",
+   "options": {
+    "common": "https://legiblerecords.org/schemas/org.legiblerecords.common/v1.json"
+   },
+   "records": [
+    {
+     "failures": [],
+     "record": {
+      "closed_at": "2026-01-01T09:00:00Z",
+      "opened_at": "2026-01-01T08:00:00Z"
+     }
+    },
+    {
+     "failures": [],
+     "record": {
+      "closed_at": "2026-01-01T09:00:00Z",
+      "opened_at": "2026-01-01T10:00:00+02:00"
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "opened_at 2026-01-01T09:00:00Z isn't before closed_at 2026-01-01T10:00:00+02:00",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "closed_at": "2026-01-01T10:00:00+02:00",
+      "opened_at": "2026-01-01T09:00:00Z"
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "opened_at 2026-01-01T10:00:00+02:00 isn't before closed_at 2026-01-01T08:00:00Z",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "closed_at": "2026-01-01T08:00:00Z",
+      "opened_at": "2026-01-01T10:00:00+02:00"
+     }
+    }
+   ],
+   "short": "fields:\n  opened_at?: datetime\n  closed_at?: datetime\nrules:\n  - before(opened_at, closed_at)\n"
+  },
+  {
+   "name": "before-numbers",
+   "records": [
+    {
+     "failures": [],
+     "record": {
+      "high": 10,
+      "low": 2.5
+     }
+    },
+    {
+     "failures": [],
+     "record": {
+      "low": -1
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "low 10 isn't before high 2.5",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "high": 2.5,
+      "low": 10
+     }
+    }
+   ],
+   "short": "fields:\n  low?: number\n  high?: number\nrules:\n  - before(low, high)\n"
+  },
+  {
+   "name": "not-after-integers",
+   "records": [
+    {
+     "failures": [],
+     "record": {
+      "revision": 3
+     }
+    },
+    {
+     "failures": [],
+     "record": {
+      "acknowledgment_from": 9,
+      "revision": 10
+     }
+    },
+    {
+     "failures": [],
+     "record": {
+      "acknowledgment_from": 3,
+      "revision": 3
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "acknowledgment_from 10 is after revision 9",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "acknowledgment_from": 10,
+      "revision": 9
+     }
+    }
+   ],
+   "short": "fields:\n  revision: integer(1..)\n  acknowledgment_from?: integer(1..)\nrules:\n  - not_after(acknowledgment_from, revision)\n"
+  },
+  {
+   "name": "not-after-dates-and-datetimes",
+   "options": {
+    "common": "https://legiblerecords.org/schemas/org.legiblerecords.common/v1.json"
+   },
+   "records": [
+    {
+     "failures": [],
+     "record": {
+      "ends_on": "2026-03-01",
+      "starts_on": "2026-03-01"
+     }
+    },
+    {
+     "failures": [],
+     "record": {
+      "ends_at": "2026-01-01T08:00:00Z",
+      "starts_at": "2026-01-01T10:00:00+02:00"
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "starts_on 2026-03-02 is after ends_on 2026-03-01",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "ends_on": "2026-03-01",
+      "starts_on": "2026-03-02"
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "starts_on 2026-03-02 is after ends_on 2026-03-01",
+       "pointer": ""
+      },
+      {
+       "message": "starts_at 2026-01-01T10:00:01+02:00 is after ends_at 2026-01-01T08:00:00Z",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "ends_at": "2026-01-01T08:00:00Z",
+      "ends_on": "2026-03-01",
+      "starts_at": "2026-01-01T10:00:01+02:00",
+      "starts_on": "2026-03-02"
+     }
+    }
+   ],
+   "short": "fields:\n  starts_on?: date\n  ends_on?: date\n  starts_at?: datetime\n  ends_at?: datetime\nrules:\n  - not_after(starts_on, ends_on)\n  - not_after(starts_at, ends_at)\n"
+  },
+  {
+   "name": "ascending",
+   "options": {
+    "common": "https://legiblerecords.org/schemas/org.legiblerecords.common/v1.json"
+   },
+   "records": [
+    {
+     "failures": [],
+     "record": {}
+    },
+    {
+     "failures": [],
+     "record": {
+      "history": [],
+      "points": []
+     }
+    },
+    {
+     "failures": [],
+     "record": {
+      "history": [
+       {
+        "since": "2026-01-01T08:00:00Z",
+        "value": "low"
+       },
+       {
+        "since": "2026-01-01T09:00:00Z",
+        "value": "high"
+       }
+      ]
+     }
+    },
+    {
+     "failures": [],
+     "record": {
+      "history": [
+       {
+        "since": "2026-01-01T10:00:00+02:00",
+        "value": "low"
+       },
+       {
+        "since": "2026-01-01T09:00:00Z",
+        "value": "high"
+       }
+      ]
+     }
+    },
+    {
+     "failures": [],
+     "record": {
+      "points": [
+       {
+        "loss": 9
+       },
+       {
+        "loss": 10
+       },
+       {
+        "loss": 10.5
+       }
+      ]
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "history isn't in order of since",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "history": [
+       {
+        "since": "2026-01-01T09:00:00Z",
+        "value": "low"
+       },
+       {
+        "since": "2026-01-01T08:00:00Z",
+        "value": "high"
+       }
+      ]
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "history isn't in order of since",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "history": [
+       {
+        "since": "2026-01-01T09:00:00Z",
+        "value": "low"
+       },
+       {
+        "since": "2026-01-01T09:00:00Z",
+        "value": "high"
+       }
+      ]
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "history isn't in order of since",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "history": [
+       {
+        "since": "2026-01-01T09:00:00Z",
+        "value": "low"
+       },
+       {
+        "value": "high"
+       }
+      ]
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "history isn't in order of since",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "history": [
+       {
+        "value": "low"
+       }
+      ]
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "history isn't in order of since",
+       "pointer": ""
+      },
+      {
+       "message": "points isn't in order of loss",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "history": [
+       {
+        "since": "2026-01-01T10:00:00+02:00",
+        "value": "low"
+       },
+       {
+        "since": "2026-01-01T08:00:00Z",
+        "value": "high"
+       }
+      ],
+      "points": [
+       {
+        "loss": 10
+       },
+       {
+        "loss": 9
+       }
+      ]
+     }
+    }
+   ],
+   "short": "fields:\n  history?:\n    items:\n      fields:\n        since?: datetime\n        value: string\n  points?:\n    items:\n      fields:\n        loss: number\nrules:\n  - ascending(history, since)\n  - ascending(points, loss)\n"
+  },
+  {
+   "name": "unique",
+   "options": {
+    "common": "https://legiblerecords.org/schemas/org.legiblerecords.common/v1.json"
+   },
+   "records": [
+    {
+     "failures": [],
+     "record": {
+      "experts": []
+     }
+    },
+    {
+     "failures": [],
+     "record": {
+      "experts": [
+       {
+        "id": "ann",
+        "name": "Ann"
+       },
+       {
+        "id": "bob",
+        "name": "Bob"
+       }
+      ]
+     }
+    },
+    {
+     "failures": [],
+     "record": {
+      "experts": [
+       {
+        "id": "ann",
+        "name": "Ann"
+       },
+       {
+        "name": "Bob"
+       },
+       {
+        "name": "Cyd"
+       }
+      ]
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "more than one item in experts has id ann",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "experts": [
+       {
+        "id": "ann",
+        "name": "Ann"
+       },
+       {
+        "id": "bob",
+        "name": "Bob"
+       },
+       {
+        "id": "ann",
+        "name": "Ann B"
+       }
+      ]
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "more than one item in experts has id bob",
+       "pointer": ""
+      },
+      {
+       "message": "more than one item in experts has id ann",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "experts": [
+       {
+        "id": "bob",
+        "name": "Bob"
+       },
+       {
+        "id": "ann",
+        "name": "Ann"
+       },
+       {
+        "id": "ann",
+        "name": "Ann B"
+       },
+       {
+        "id": "bob",
+        "name": "Bob B"
+       },
+       {
+        "id": "ann",
+        "name": "Ann C"
+       }
+      ]
+     }
+    }
+   ],
+   "short": "fields:\n  experts:\n    items:\n      fields:\n        id?: slug\n        name: string\nrules:\n  - unique(experts, id)\n"
+  },
+  {
+   "name": "within",
+   "options": {
+    "common": "https://legiblerecords.org/schemas/org.legiblerecords.common/v1.json"
+   },
+   "records": [
+    {
+     "failures": [],
+     "record": {
+      "experts": [
+       {
+        "id": "ann"
+       }
+      ],
+      "statements": []
+     }
+    },
+    {
+     "failures": [],
+     "record": {
+      "experts": [],
+      "statements": [
+       {
+        "estimates": []
+       }
+      ]
+     }
+    },
+    {
+     "failures": [],
+     "record": {
+      "experts": [
+       {
+        "id": "ann"
+       },
+       {
+        "id": "bob"
+       }
+      ],
+      "statements": [
+       {
+        "estimates": [
+         {
+          "expert": "ann"
+         },
+         {
+          "expert": "bob"
+         }
+        ]
+       },
+       {
+        "estimates": []
+       },
+       {
+        "estimates": [
+         {
+          "expert": "ann"
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "cyd at statements[].estimates[].expert isn't among experts[].id",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "experts": [
+       {
+        "id": "ann"
+       }
+      ],
+      "statements": [
+       {
+        "estimates": [
+         {
+          "expert": "ann"
+         }
+        ]
+       },
+       {
+        "estimates": [
+         {
+          "expert": "cyd"
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "ann at statements[].estimates[].expert isn't among experts[].id",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "experts": [],
+      "statements": [
+       {
+        "estimates": [
+         {
+          "expert": "ann"
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "dee at statements[].estimates[].expert isn't among experts[].id",
+       "pointer": ""
+      },
+      {
+       "message": "cyd at statements[].estimates[].expert isn't among experts[].id",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "experts": [
+       {
+        "id": "ann"
+       }
+      ],
+      "statements": [
+       {
+        "estimates": [
+         {
+          "expert": "dee"
+         },
+         {
+          "expert": "ann"
+         }
+        ]
+       },
+       {
+        "estimates": [
+         {
+          "expert": "cyd"
+         },
+         {
+          "expert": "dee"
+         }
+        ]
+       }
+      ]
+     }
+    }
+   ],
+   "short": "fields:\n  experts:\n    items:\n      fields:\n        id: slug\n  statements:\n    items:\n      fields:\n        estimates:\n          items:\n            fields:\n              expert: slug\nrules:\n  - within(statements[].estimates[].expert, experts[].id)\n"
+  },
+  {
+   "name": "within-one-list",
+   "options": {
+    "common": "https://legiblerecords.org/schemas/org.legiblerecords.common/v1.json"
+   },
+   "records": [
+    {
+     "failures": [],
+     "record": {
+      "groups": []
+     }
+    },
+    {
+     "failures": [],
+     "record": {
+      "groups": [
+       {
+        "id": "top"
+       },
+       {
+        "id": "sub",
+        "parent": "top"
+       }
+      ]
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "none at groups[].parent isn't among groups[].id",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "groups": [
+       {
+        "id": "top",
+        "parent": "none"
+       },
+       {
+        "id": "sub",
+        "parent": "top"
+       }
+      ]
+     }
+    }
+   ],
+   "short": "fields:\n  groups:\n    items:\n      fields:\n        id: slug\n        parent?: slug\nrules:\n  - within(groups[].parent, groups[].id)\n"
+  },
+  {
+   "name": "rules-on-items",
+   "options": {
+    "common": "https://legiblerecords.org/schemas/org.legiblerecords.common/v1.json"
+   },
+   "records": [
+    {
+     "failures": [],
+     "record": {}
+    },
+    {
+     "failures": [],
+     "record": {
+      "approvals": [
+       {
+        "name": "Ann",
+        "on": "2026-02-01"
+       },
+       {
+        "at": "2026-01-01T09:00:00Z",
+        "name": "Bob"
+       }
+      ]
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "needs exactly one of at and on",
+       "pointer": "/approvals/1"
+      },
+      {
+       "message": "needs exactly one of at and on",
+       "pointer": "/approvals/2"
+      }
+     ],
+     "record": {
+      "approvals": [
+       {
+        "name": "Ann",
+        "on": "2026-02-01"
+       },
+       {
+        "at": "2026-01-01T09:00:00Z",
+        "name": "Bob",
+        "on": "2026-02-01"
+       },
+       {
+        "name": "Cyd"
+       }
+      ]
+     }
+    }
+   ],
+   "short": "fields:\n  approvals?:\n    items:\n      fields:\n        name: string\n        at?: datetime\n        on?: date\n      rules:\n        - one_of(at, on)\n"
+  },
+  {
+   "name": "rules-on-field-mapping",
+   "records": [
+    {
+     "failures": [],
+     "record": {}
+    },
+    {
+     "failures": [],
+     "record": {
+      "seen_in": {
+       "tag": "v1"
+      }
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "needs digest, tag or commit",
+       "pointer": "/seen_in"
+      }
+     ],
+     "record": {
+      "seen_in": {}
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "needs digest, tag or commit",
+       "pointer": "/seen_in"
+      }
+     ],
+     "record": {
+      "seen_in": {
+       "digest": ""
+      }
+     }
+    }
+   ],
+   "short": "fields:\n  seen_in?:\n    fields:\n      digest?: string\n      tag?: string\n      commit?: string\n    rules:\n      - any_of(digest, tag, commit)\n"
+  },
+  {
+   "name": "failure-order",
+   "options": {
+    "common": "https://legiblerecords.org/schemas/org.legiblerecords.common/v1.json"
+   },
+   "records": [
+    {
+     "failures": [],
+     "record": {
+      "approvals": [
+       {
+        "name": "Ann",
+        "on": "2026-02-01"
+       }
+      ],
+      "closed_on": "2026-02-01",
+      "on": "2026-02-01",
+      "opened_on": "2026-01-31",
+      "seen_in": {
+       "commit": "abc123"
+      }
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "opened_on 2026-02-01 isn't before closed_on 2026-01-31",
+       "pointer": ""
+      },
+      {
+       "message": "needs exactly one of at and on",
+       "pointer": ""
+      },
+      {
+       "message": "needs exactly one of at and on",
+       "pointer": "/approvals/1"
+      },
+      {
+       "message": "needs exactly one of at and on",
+       "pointer": "/approvals/2"
+      },
+      {
+       "message": "needs digest, tag or commit",
+       "pointer": "/seen_in"
+      }
+     ],
+     "record": {
+      "approvals": [
+       {
+        "name": "Ann",
+        "on": "2026-02-01"
+       },
+       {
+        "name": "Bob"
+       },
+       {
+        "at": "2026-01-01T09:00:00Z",
+        "name": "Cyd",
+        "on": "2026-02-01"
+       }
+      ],
+      "closed_on": "2026-01-31",
+      "opened_on": "2026-02-01",
+      "seen_in": {}
+     }
+    }
+   ],
+   "short": "fields:\n  approvals:\n    items:\n      fields:\n        name: string\n        at?: datetime\n        on?: date\n      rules:\n        - one_of(at, on)\n  at?: datetime\n  closed_on?: date\n  on?: date\n  opened_on?: date\n  seen_in?:\n    fields:\n      digest?: string\n      tag?: string\n      commit?: string\n    rules:\n      - any_of(digest, tag, commit)\nrules:\n  - before(opened_on, closed_on)\n  - one_of(at, on)\n"
+  }
+ ],
+ "description": "Rules: each case's `short` is expanded with the defaults, or with `options` when given, and each record in `records` is checked against the result. `failures` lists the rule failures the check reports, in order, each with `pointer`, the JSON pointer of the object the rule sits on (\"\" for the root, /approvals/1 for a rule on the items of approvals), and `message`. It lists nothing for the type's own keywords: a record that also breaks those, such as a date field holding something that isn't a date, lists only its rule failures. Failures are ordered by pointer, in document order (an object before the objects inside it, and those in the order they appear), then by the order of the rules on one object. A rule whose message names a value, `unique` or `within`, fails once for each such value, in the order the values first appear."
+}

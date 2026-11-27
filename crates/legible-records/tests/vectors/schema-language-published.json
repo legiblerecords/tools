@@ -74,6 +74,86 @@
   {
    "expect": {
     "body": {
+     "$id": "https://example.org/schemas/org.example.thing/v1.json",
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "allOf": [
+      {
+       "oneOf": [
+        {
+         "required": [
+          "at"
+         ]
+        },
+        {
+         "required": [
+          "on"
+         ]
+        }
+       ],
+       "x-rule": "one_of(at, on)"
+      },
+      {
+       "if": {
+        "properties": {
+         "status": {
+          "const": "closed"
+         }
+        },
+        "required": [
+         "status"
+        ]
+       },
+       "then": {
+        "required": [
+         "closed_at"
+        ]
+       },
+       "x-rule": "requires(status = closed, closed_at)"
+      }
+     ],
+     "properties": {
+      "$type": {
+       "const": "org.example.thing"
+      },
+      "at": {
+       "$ref": "https://legiblerecords.org/schemas/org.legiblerecords.common/v1.json#/$defs/datetime"
+      },
+      "closed_at": {
+       "$ref": "https://legiblerecords.org/schemas/org.legiblerecords.common/v1.json#/$defs/datetime"
+      },
+      "on": {
+       "$ref": "https://legiblerecords.org/schemas/org.legiblerecords.common/v1.json#/$defs/date"
+      },
+      "status": {
+       "examples": [
+        "open",
+        "closed"
+       ],
+       "type": "string"
+      },
+      "version": {
+       "const": 1
+      }
+     },
+     "required": [
+      "$type",
+      "version",
+      "status"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "published-rules",
+   "options": {
+    "base": "https://example.org/schemas/",
+    "common": "https://legiblerecords.org/schemas/org.legiblerecords.common/v1.json"
+   },
+   "schema": "thing",
+   "short": "type: org.example.thing\nversion: 1\nfields:\n  status: known(open, closed)\n  at?: datetime\n  on?: date\n  closed_at?: datetime\nrules:\n  - one_of(at, on)\n  - requires(status = closed, closed_at)\n"
+  },
+  {
+   "expect": {
+    "body": {
      "$schema": "https://json-schema.org/draft/2020-12/schema",
      "properties": {
       "x": {
@@ -225,6 +305,24 @@
    },
    "schema": "t",
    "short": "type: org.example.thing\nversion: 1\nfields:\n  version: string\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 6,
+      "message": "no field version in `one_of(version, x)`",
+      "path": "rules[0]"
+     }
+    ]
+   },
+   "name": "error-rules-version-not-a-field",
+   "options": {
+    "base": "https://example.org/schemas/",
+    "common": "https://legiblerecords.org/schemas/org.legiblerecords.common/v1.json"
+   },
+   "schema": "thing",
+   "short": "type: org.example.thing\nversion: 1\nfields:\n  x?: string\nrules:\n  - one_of(version, x)\n"
   },
   {
    "body": {

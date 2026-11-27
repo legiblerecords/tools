@@ -1008,6 +1008,1070 @@
   },
   {
    "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "allOf": [
+      {
+       "oneOf": [
+        {
+         "required": [
+          "at"
+         ]
+        },
+        {
+         "required": [
+          "on"
+         ]
+        }
+       ],
+       "x-rule": "one_of(at, on)"
+      }
+     ],
+     "properties": {
+      "at": {
+       "$ref": "common.schema.json#/$defs/datetime"
+      },
+      "on": {
+       "$ref": "common.schema.json#/$defs/date"
+      }
+     },
+     "type": "object"
+    }
+   },
+   "name": "rules-one-of",
+   "schema": "t",
+   "short": "fields:\n  at?: datetime\n  on?: date\nrules:\n  - one_of(at, on)\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "allOf": [
+      {
+       "not": {
+        "allOf": [
+         {
+          "required": [
+           "requested_at"
+          ]
+         },
+         {
+          "required": [
+           "requested_on"
+          ]
+         }
+        ]
+       },
+       "x-rule": "at_most_one(requested_at, requested_on)"
+      }
+     ],
+     "properties": {
+      "requested_at": {
+       "$ref": "common.schema.json#/$defs/datetime"
+      },
+      "requested_on": {
+       "$ref": "common.schema.json#/$defs/date"
+      }
+     },
+     "type": "object"
+    }
+   },
+   "name": "rules-at-most-one",
+   "schema": "t",
+   "short": "fields:\n  requested_at?: datetime\n  requested_on?: date\nrules:\n  - at_most_one(requested_at, requested_on)\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "allOf": [
+      {
+       "anyOf": [
+        {
+         "properties": {
+          "subjects": {
+           "minItems": 1
+          }
+         },
+         "required": [
+          "subjects"
+         ]
+        },
+        {
+         "properties": {
+          "subject_refs": {
+           "minItems": 1
+          }
+         },
+         "required": [
+          "subject_refs"
+         ]
+        },
+        {
+         "required": [
+          "match"
+         ]
+        }
+       ],
+       "x-rule": "any_of(subjects, subject_refs, match)"
+      }
+     ],
+     "properties": {
+      "match": {
+       "type": "object"
+      },
+      "subject_refs": {
+       "items": {
+        "$ref": "common.schema.json#/$defs/externalRef"
+       },
+       "type": "array"
+      },
+      "subjects": {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      }
+     },
+     "type": "object"
+    }
+   },
+   "name": "rules-any-of",
+   "schema": "t",
+   "short": "fields:\n  subjects?: string[]\n  subject_refs?: externalRef[]\n  match?: object\nrules:\n  - any_of(subjects, subject_refs, match)\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "allOf": [
+      {
+       "if": {
+        "required": [
+         "line"
+        ]
+       },
+       "then": {
+        "properties": {
+         "affected_file": {
+          "minLength": 1
+         }
+        },
+        "required": [
+         "affected_file"
+        ]
+       },
+       "x-rule": "requires(line, affected_file)"
+      }
+     ],
+     "properties": {
+      "affected_file": {
+       "type": "string"
+      },
+      "line": {
+       "minimum": 1,
+       "type": "integer"
+      }
+     },
+     "type": "object"
+    }
+   },
+   "name": "rules-requires-field",
+   "schema": "t",
+   "short": "fields:\n  line?: integer(1..)\n  affected_file?: string\nrules:\n  - requires(line, affected_file)\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "allOf": [
+      {
+       "if": {
+        "properties": {
+         "status": {
+          "const": "closed"
+         }
+        },
+        "required": [
+         "status"
+        ]
+       },
+       "then": {
+        "required": [
+         "closed_at"
+        ]
+       },
+       "x-rule": "requires(status = closed, closed_at)"
+      },
+      {
+       "if": {
+        "required": [
+         "closed_at"
+        ]
+       },
+       "then": {
+        "properties": {
+         "status": {
+          "const": "closed"
+         }
+        },
+        "required": [
+         "status"
+        ]
+       },
+       "x-rule": "requires(closed_at, status = closed)"
+      }
+     ],
+     "properties": {
+      "closed_at": {
+       "$ref": "common.schema.json#/$defs/datetime"
+      },
+      "status": {
+       "examples": [
+        "open",
+        "closed"
+       ],
+       "type": "string"
+      }
+     },
+     "required": [
+      "status"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "rules-requires-value",
+   "schema": "t",
+   "short": "fields:\n  status: known(open, closed)\n  closed_at?: datetime\nrules:\n  - requires(status = closed, closed_at)\n  - requires(closed_at, status = closed)\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "allOf": [
+      {
+       "if": {
+        "properties": {
+         "kind": {
+          "enum": [
+           "service",
+           "shared"
+          ]
+         }
+        },
+        "required": [
+         "kind"
+        ]
+       },
+       "then": {
+        "properties": {
+         "owner": {
+          "minLength": 1
+         }
+        },
+        "required": [
+         "owner"
+        ]
+       },
+       "x-rule": "requires(kind in (service, shared), owner)"
+      }
+     ],
+     "properties": {
+      "kind": {
+       "examples": [
+        "person",
+        "service",
+        "shared"
+       ],
+       "type": "string"
+      },
+      "owner": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "kind"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "rules-requires-in",
+   "schema": "t",
+   "short": "fields:\n  kind: known(person, service, shared)\n  owner?: string\nrules:\n  - requires(kind in (service, shared),  owner)\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "allOf": [
+      {
+       "if": {
+        "not": {
+         "properties": {
+          "kind": {
+           "const": "service"
+          }
+         },
+         "required": [
+          "kind"
+         ]
+        }
+       },
+       "then": {
+        "required": [
+         "person"
+        ]
+       },
+       "x-rule": "requires(not kind = service, person)"
+      }
+     ],
+     "properties": {
+      "kind": {
+       "examples": [
+        "person",
+        "service",
+        "shared"
+       ],
+       "type": "string"
+      },
+      "person": {
+       "$ref": "common.schema.json#/$defs/email"
+      }
+     },
+     "required": [
+      "kind"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "rules-requires-not",
+   "schema": "t",
+   "short": "fields:\n  kind: known(person, service, shared)\n  person?: email\nrules:\n  - requires(not kind = service, person)\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "allOf": [
+      {
+       "if": {
+        "properties": {
+         "status": {
+          "const": "fixed"
+         }
+        },
+        "required": [
+         "status"
+        ]
+       },
+       "then": {
+        "anyOf": [
+         {
+          "required": [
+           "fixed_at"
+          ]
+         },
+         {
+          "required": [
+           "fixed_on"
+          ]
+         }
+        ]
+       },
+       "x-rule": "requires(status = fixed, any_of(fixed_at, fixed_on))"
+      }
+     ],
+     "properties": {
+      "fixed_at": {
+       "$ref": "common.schema.json#/$defs/datetime"
+      },
+      "fixed_on": {
+       "$ref": "common.schema.json#/$defs/date"
+      },
+      "status": {
+       "examples": [
+        "open",
+        "fixed"
+       ],
+       "type": "string"
+      }
+     },
+     "required": [
+      "status"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "rules-requires-any-of",
+   "schema": "t",
+   "short": "fields:\n  status: known(open, fixed)\n  fixed_at?: datetime\n  fixed_on?: date\nrules:\n  - requires(status = fixed, any_of(fixed_at, fixed_on))\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "allOf": [
+      {
+       "if": {
+        "not": {
+         "properties": {
+          "kind": {
+           "enum": [
+            "service",
+            "shared"
+           ]
+          }
+         },
+         "required": [
+          "kind"
+         ]
+        }
+       },
+       "then": {
+        "anyOf": [
+         {
+          "required": [
+           "person"
+          ]
+         },
+         {
+          "required": [
+           "person_match"
+          ]
+         }
+        ]
+       },
+       "x-rule": "requires(not kind in (service, shared), any_of(person, person_match))"
+      }
+     ],
+     "properties": {
+      "kind": {
+       "examples": [
+        "person",
+        "service",
+        "shared"
+       ],
+       "type": "string"
+      },
+      "person": {
+       "$ref": "common.schema.json#/$defs/email"
+      },
+      "person_match": {
+       "$ref": "common.schema.json#/$defs/personMatch"
+      }
+     },
+     "required": [
+      "kind"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "rules-requires-not-in-any-of",
+   "schema": "t",
+   "short": "fields:\n  kind: known(person, service, shared)\n  person?: email\n  person_match?: personMatch\nrules:\n  - requires(not kind in (service, shared), any_of(person, person_match))\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "allOf": [
+      {
+       "x-rule": "before(original_due, expires)"
+      }
+     ],
+     "properties": {
+      "expires": {
+       "$ref": "common.schema.json#/$defs/date"
+      },
+      "original_due": {
+       "$ref": "common.schema.json#/$defs/date"
+      }
+     },
+     "type": "object"
+    }
+   },
+   "name": "rules-before",
+   "schema": "t",
+   "short": "fields:\n  original_due?: date\n  expires?: date\nrules:\n  - before(original_due, expires)\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "allOf": [
+      {
+       "x-rule": "not_after(acknowledgment_from, revision)"
+      }
+     ],
+     "properties": {
+      "acknowledgment_from": {
+       "minimum": 1,
+       "type": "integer"
+      },
+      "revision": {
+       "minimum": 1,
+       "type": "integer"
+      }
+     },
+     "required": [
+      "revision"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "rules-not-after",
+   "schema": "t",
+   "short": "fields:\n  revision: integer(1..)\n  acknowledgment_from?: integer(1..)\nrules:\n  - not_after(acknowledgment_from, revision)\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "allOf": [
+      {
+       "x-rule": "ascending(history, since)"
+      }
+     ],
+     "properties": {
+      "history": {
+       "items": {
+        "properties": {
+         "since": {
+          "$ref": "common.schema.json#/$defs/datetime"
+         },
+         "value": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "since",
+         "value"
+        ],
+        "type": "object"
+       },
+       "type": "array"
+      }
+     },
+     "type": "object"
+    }
+   },
+   "name": "rules-ascending",
+   "schema": "t",
+   "short": "fields:\n  history?:\n    items:\n      fields:\n        since: datetime\n        value: string\nrules:\n  - ascending(history, since)\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "allOf": [
+      {
+       "x-rule": "unique(targets, severity)"
+      }
+     ],
+     "properties": {
+      "targets": {
+       "items": {
+        "properties": {
+         "days": {
+          "minimum": 1,
+          "type": "integer"
+         },
+         "severity": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "days",
+         "severity"
+        ],
+        "type": "object"
+       },
+       "type": "array"
+      }
+     },
+     "required": [
+      "targets"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "rules-unique",
+   "schema": "t",
+   "short": "fields:\n  targets:\n    items:\n      fields:\n        severity: string\n        days: integer(1..)\nrules:\n  - unique(targets, severity)\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "allOf": [
+      {
+       "x-rule": "within(statements[].estimates[].expert, experts[].id)"
+      }
+     ],
+     "properties": {
+      "experts": {
+       "items": {
+        "properties": {
+         "id": {
+          "$ref": "common.schema.json#/$defs/slug"
+         }
+        },
+        "required": [
+         "id"
+        ],
+        "type": "object"
+       },
+       "type": "array"
+      },
+      "statements": {
+       "items": {
+        "properties": {
+         "estimates": {
+          "items": {
+           "properties": {
+            "expert": {
+             "$ref": "common.schema.json#/$defs/slug"
+            }
+           },
+           "required": [
+            "expert"
+           ],
+           "type": "object"
+          },
+          "type": "array"
+         }
+        },
+        "required": [
+         "estimates"
+        ],
+        "type": "object"
+       },
+       "type": "array"
+      }
+     },
+     "required": [
+      "experts",
+      "statements"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "rules-within",
+   "schema": "t",
+   "short": "fields:\n  experts:\n    items:\n      fields:\n        id: slug\n  statements:\n    items:\n      fields:\n        estimates:\n          items:\n            fields:\n              expert: slug\nrules:\n  - within(statements[].estimates[].expert, experts[].id)\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "approvals": {
+       "items": {
+        "allOf": [
+         {
+          "oneOf": [
+           {
+            "required": [
+             "at"
+            ]
+           },
+           {
+            "required": [
+             "on"
+            ]
+           }
+          ],
+          "x-rule": "one_of(at, on)"
+         }
+        ],
+        "properties": {
+         "at": {
+          "$ref": "common.schema.json#/$defs/datetime"
+         },
+         "name": {
+          "type": "string"
+         },
+         "on": {
+          "$ref": "common.schema.json#/$defs/date"
+         }
+        },
+        "required": [
+         "name"
+        ],
+        "type": "object"
+       },
+       "type": "array"
+      }
+     },
+     "type": "object"
+    }
+   },
+   "name": "rules-on-items",
+   "schema": "t",
+   "short": "fields:\n  approvals?:\n    items:\n      fields:\n        name: string\n        at?: datetime\n        on?: date\n      rules:\n        - one_of(at, on)\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "properties": {
+      "seen_in": {
+       "allOf": [
+        {
+         "anyOf": [
+          {
+           "properties": {
+            "digest": {
+             "minLength": 1
+            }
+           },
+           "required": [
+            "digest"
+           ]
+          },
+          {
+           "properties": {
+            "tag": {
+             "minLength": 1
+            }
+           },
+           "required": [
+            "tag"
+           ]
+          },
+          {
+           "properties": {
+            "branches": {
+             "minItems": 1
+            }
+           },
+           "required": [
+            "branches"
+           ]
+          }
+         ],
+         "x-rule": "any_of(digest, tag, branches)"
+        }
+       ],
+       "properties": {
+        "branches": {
+         "items": {
+          "type": "string"
+         },
+         "type": "array"
+        },
+        "digest": {
+         "type": "string"
+        },
+        "tag": {
+         "type": "string"
+        }
+       },
+       "type": "object"
+      }
+     },
+     "required": [
+      "seen_in"
+     ],
+     "type": "object"
+    }
+   },
+   "name": "rules-on-field-mapping",
+   "schema": "t",
+   "short": "fields:\n  seen_in:\n    fields:\n      digest?: string\n      tag?: string\n      branches?: string[]\n    rules:\n      - any_of(digest, tag, branches)\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$defs": {
+      "personMatch": {
+       "allOf": [
+        {
+         "anyOf": [
+          {
+           "properties": {
+            "emails": {
+             "minItems": 1
+            }
+           },
+           "required": [
+            "emails"
+           ]
+          },
+          {
+           "properties": {
+            "identifiers": {
+             "minItems": 1
+            }
+           },
+           "required": [
+            "identifiers"
+           ]
+          }
+         ],
+         "x-rule": "any_of(emails, identifiers)"
+        }
+       ],
+       "properties": {
+        "emails": {
+         "items": {
+          "$ref": "common.schema.json#/$defs/email"
+         },
+         "type": "array"
+        },
+        "identifiers": {
+         "items": {
+          "$ref": "common.schema.json#/$defs/identifier"
+         },
+         "type": "array"
+        }
+       },
+       "type": "object"
+      }
+     },
+     "$schema": "https://json-schema.org/draft/2020-12/schema"
+    }
+   },
+   "name": "rules-on-defs-entry",
+   "schema": "t",
+   "short": "defs:\n  personMatch:\n    fields:\n      emails?: email[]\n      identifiers?: identifier[]\n    rules:\n      - any_of(emails, identifiers)\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "allOf": [
+      {
+       "anyOf": [
+        {
+         "properties": {
+          "tags": {
+           "minItems": 1
+          }
+         },
+         "required": [
+          "tags"
+         ]
+        },
+        {
+         "properties": {
+          "steps": {
+           "minItems": 1
+          }
+         },
+         "required": [
+          "steps"
+         ]
+        }
+       ],
+       "x-rule": "any_of(tags, steps)"
+      }
+     ],
+     "properties": {
+      "steps": {
+       "items": {
+        "properties": {
+         "text": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "text"
+        ],
+        "type": "object"
+       },
+       "type": "array"
+      },
+      "tags": {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      }
+     },
+     "type": "object"
+    }
+   },
+   "name": "rules-given-list",
+   "schema": "t",
+   "short": "fields:\n  tags?: string[]\n  steps?:\n    items:\n      fields:\n        text: string\nrules:\n  - any_of(tags, steps)\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "allOf": [
+      {
+       "anyOf": [
+        {
+         "properties": {
+          "name": {
+           "minLength": 1
+          }
+         },
+         "required": [
+          "name"
+         ]
+        },
+        {
+         "properties": {
+          "code": {
+           "minLength": 1
+          }
+         },
+         "required": [
+          "code"
+         ]
+        }
+       ],
+       "x-rule": "any_of(name, code)"
+      }
+     ],
+     "properties": {
+      "code": {
+       "maxLength": 8,
+       "type": "string"
+      },
+      "name": {
+       "type": "string"
+      }
+     },
+     "type": "object"
+    }
+   },
+   "name": "rules-given-string",
+   "schema": "t",
+   "short": "fields:\n  name?: string\n  code?:\n    type: string\n    json:\n      maxLength: 8\nrules:\n  - any_of(name, code)\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "allOf": [
+      {
+       "anyOf": [
+        {
+         "properties": {
+          "code": {
+           "minLength": 1
+          }
+         },
+         "required": [
+          "code"
+         ]
+        },
+        {
+         "required": [
+          "on"
+         ]
+        }
+       ],
+       "x-rule": "any_of(code, on)"
+      }
+     ],
+     "properties": {
+      "code": {
+       "pattern": "^x$",
+       "type": "string"
+      },
+      "on": {
+       "$ref": "common.schema.json#/$defs/date"
+      }
+     },
+     "type": "object"
+    }
+   },
+   "name": "rules-given-pattern",
+   "schema": "t",
+   "short": "fields:\n  code?: /^x$/\n  on?: date\nrules:\n  - any_of(code, on)\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "allOf": [
+      {
+       "anyOf": [
+        {
+         "required": [
+          "subject"
+         ]
+        },
+        {
+         "required": [
+          "owner"
+         ]
+        }
+       ],
+       "x-rule": "any_of(subject, owner)"
+      }
+     ],
+     "properties": {
+      "owner": {
+       "$ref": "common.schema.json#/$defs/refString",
+       "ref": "person"
+      },
+      "subject": {
+       "$ref": "common.schema.json#/$defs/refString",
+       "ref": [
+        "alert",
+        "finding"
+       ]
+      }
+     },
+     "type": "object"
+    }
+   },
+   "name": "rules-given-ref",
+   "schema": "t",
+   "short": "fields:\n  subject?: ref(alert, finding)\n  owner?: ref(person)\nrules:\n  - any_of(subject, owner)\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "allOf": [
+      {
+       "anyOf": [
+        {
+         "required": [
+          "level"
+         ]
+        },
+        {
+         "required": [
+          "tier"
+         ]
+        }
+       ],
+       "x-rule": "any_of(level, tier)"
+      }
+     ],
+     "properties": {
+      "level": {
+       "examples": [
+        "low",
+        "high"
+       ],
+       "type": "string"
+      },
+      "tier": {
+       "enum": [
+        "a",
+        "b"
+       ],
+       "type": "string"
+      }
+     },
+     "type": "object"
+    }
+   },
+   "name": "rules-given-known",
+   "schema": "t",
+   "short": "fields:\n  level?: known(low, high)\n  tier?: enum(a, b)\nrules:\n  - any_of(level, tier)\n"
+  },
+  {
+   "expect": {
     "problems": [
      {
       "line": 2,
@@ -1255,6 +2319,174 @@
    "short": "- a\n"
   },
   {
+   "expect": {
+    "problems": [
+     {
+      "line": 2,
+      "message": "rules without fields",
+      "path": "rules"
+     }
+    ]
+   },
+   "name": "error-rules-without-fields",
+   "schema": "t",
+   "short": "title: t\nrules:\n  - one_of(a, b)\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 5,
+      "message": "unknown shape frob in `frob(a, b)`",
+      "path": "rules[0]"
+     }
+    ]
+   },
+   "name": "error-rules-unknown-shape",
+   "schema": "t",
+   "short": "fields:\n  a?: string\n  b?: string\nrules:\n  - frob(a, b)\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 5,
+      "message": "no field x in `one_of(a, x)`",
+      "path": "rules[0]"
+     }
+    ]
+   },
+   "name": "error-rules-no-field",
+   "schema": "t",
+   "short": "fields:\n  a?: string\n  b?: string\nrules:\n  - one_of(a, x)\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 6,
+      "message": "rule written twice in `one_of(a,  b)`",
+      "path": "rules[1]"
+     }
+    ]
+   },
+   "name": "error-rules-twice",
+   "schema": "t",
+   "short": "fields:\n  a?: string\n  b?: string\nrules:\n  - one_of(a, b)\n  - one_of(a,  b)\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 7,
+      "message": "rules on an object that may be null",
+      "path": "fields.m.rules"
+     }
+    ]
+   },
+   "name": "error-rules-nullable-object",
+   "schema": "t",
+   "short": "fields:\n  m:\n    type: object?\n    fields:\n      a?: string\n      b?: string\n    rules:\n      - one_of(a, b)\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 7,
+      "message": "json sets allOf beside rules",
+      "path": "json.allOf"
+     }
+    ]
+   },
+   "name": "error-rules-json-allof",
+   "schema": "t",
+   "short": "fields:\n  a?: string\n  b?: string\nrules:\n  - one_of(a, b)\njson:\n  allOf:\n    - required: [a]\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 5,
+      "message": "x is nullable in `one_of(x, y)`",
+      "path": "rules[0]"
+     }
+    ]
+   },
+   "name": "error-rules-nullable-field",
+   "schema": "t",
+   "short": "fields:\n  x?: string?\n  y?: string\nrules:\n  - one_of(x, y)\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 5,
+      "message": "before needs numbers, dates or datetimes: x is string in `before(x, y)`",
+      "path": "rules[0]"
+     }
+    ]
+   },
+   "name": "error-rules-before-kind",
+   "schema": "t",
+   "short": "fields:\n  x?: string\n  y?: date\nrules:\n  - before(x, y)\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 5,
+      "message": "before compares a date with a datetime in `before(d, t)`",
+      "path": "rules[0]"
+     }
+    ]
+   },
+   "name": "error-rules-before-mixed-kinds",
+   "schema": "t",
+   "short": "fields:\n  d?: date\n  t?: datetime\nrules:\n  - before(d, t)\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 6,
+      "message": "at_most_one takes two fields in `at_most_one(a, b, c)`",
+      "path": "rules[0]"
+     }
+    ]
+   },
+   "name": "error-rules-at-most-one-arity",
+   "schema": "t",
+   "short": "fields:\n  a?: string\n  b?: string\n  c?: string\nrules:\n  - at_most_one(a, b, c)\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 6,
+      "message": "requires takes only any_of inside it in `requires(one_of(a, b), c)`",
+      "path": "rules[0]"
+     }
+    ]
+   },
+   "name": "error-rules-requires-inner-shape",
+   "schema": "t",
+   "short": "fields:\n  a?: string\n  b?: string\n  c?: string\nrules:\n  - requires(one_of(a, b), c)\n"
+  },
+  {
+   "expect": {
+    "problems": [
+     {
+      "line": 5,
+      "message": "bad rule in `one_of(a, b`",
+      "path": "rules[0]"
+     }
+    ]
+   },
+   "name": "error-rules-syntax",
+   "schema": "t",
+   "short": "fields:\n  a?: string\n  b?: string\nrules:\n  - one_of(a, b\n"
+  },
+  {
    "body": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": true,
@@ -1344,6 +2576,229 @@
     "short": "json:\n  $id: t.schema.json\n  $schema: http://json-schema.org/draft-07/schema#\n  type: string\n"
    },
    "name": "generate-other-schema-keeps-id",
+   "schema": "t"
+  },
+  {
+   "body": {
+    "$defs": {
+     "tier": {
+      "enum": [
+       "a",
+       "b"
+      ],
+      "type": "string"
+     }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "allOf": [
+     {
+      "oneOf": [
+       {
+        "required": [
+         "at"
+        ]
+       },
+       {
+        "required": [
+         "on"
+        ]
+       }
+      ],
+      "x-rule": "one_of(at, on)"
+     },
+     {
+      "if": {
+       "properties": {
+        "status": {
+         "const": "closed"
+        }
+       },
+       "required": [
+        "status"
+       ]
+      },
+      "then": {
+       "required": [
+        "closed_at"
+       ]
+      },
+      "x-rule": "requires(status = closed, closed_at)"
+     }
+    ],
+    "examples": [
+     {
+      "status": "open"
+     }
+    ],
+    "properties": {
+     "at": {
+      "$ref": "common.schema.json#/$defs/datetime"
+     },
+     "closed_at": {
+      "$ref": "common.schema.json#/$defs/datetime"
+     },
+     "on": {
+      "$ref": "common.schema.json#/$defs/date"
+     },
+     "seen_in": {
+      "allOf": [
+       {
+        "anyOf": [
+         {
+          "properties": {
+           "digest": {
+            "minLength": 1
+           }
+          },
+          "required": [
+           "digest"
+          ]
+         },
+         {
+          "properties": {
+           "tag": {
+            "minLength": 1
+           }
+          },
+          "required": [
+           "tag"
+          ]
+         }
+        ],
+        "x-rule": "any_of(digest, tag)"
+       }
+      ],
+      "description": "Where it was seen.",
+      "examples": [
+       {
+        "digest": "abc"
+       }
+      ],
+      "properties": {
+       "digest": {
+        "type": "string"
+       },
+       "tag": {
+        "type": "string"
+       }
+      },
+      "type": "object"
+     },
+     "status": {
+      "enum": [
+       "open",
+       "closed"
+      ],
+      "type": "string"
+     }
+    },
+    "required": [
+     "status"
+    ],
+    "title": "t",
+    "type": "object"
+   },
+   "expect": {
+    "short": "title: t\nfields:\n  status: enum(open, closed)\n  at?: datetime\n  closed_at?: datetime\n  on?: date\n  seen_in?:\n    description: Where it was seen.\n    fields:\n      digest?: string\n      tag?: string\n    rules:\n      - any_of(digest, tag)\n    examples:\n      - digest: abc\nrules:\n  - one_of(at, on)\n  - requires(status = closed, closed_at)\ndefs:\n  tier: enum(a, b)\nexamples:\n  - status: open\n"
+   },
+   "name": "generate-rules",
+   "schema": "t"
+  },
+  {
+   "body": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "allOf": [
+     {
+      "anyOf": [
+       {
+        "properties": {
+         "a": {
+          "minLength": 1
+         }
+        },
+        "required": [
+         "a"
+        ]
+       },
+       {
+        "properties": {
+         "b": {
+          "minLength": 1
+         }
+        },
+        "required": [
+         "b"
+        ]
+       }
+      ],
+      "x-rule": "one_of(a, b)"
+     }
+    ],
+    "properties": {
+     "a": {
+      "type": "string"
+     },
+     "b": {
+      "type": "string"
+     }
+    },
+    "type": "object"
+   },
+   "expect": {
+    "short": "fields:\n  a?: string\n  b?: string\njson:\n  allOf:\n    - anyOf:\n        - properties:\n            a:\n              minLength: 1\n          required: [a]\n        - properties:\n            b:\n              minLength: 1\n          required: [b]\n      x-rule: one_of(a, b)\n"
+   },
+   "name": "generate-allof-not-rules",
+   "schema": "t"
+  },
+  {
+   "body": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "allOf": [
+     {
+      "oneOf": [
+       {
+        "properties": {
+         "a": {
+          "minLength": 1
+         }
+        },
+        "required": [
+         "a"
+        ]
+       },
+       {
+        "properties": {
+         "b": {
+          "minLength": 1
+         }
+        },
+        "required": [
+         "b"
+        ]
+       }
+      ],
+      "x-rule": "one_of(a, b)"
+     },
+     {
+      "required": [
+       "a"
+      ]
+     }
+    ],
+    "properties": {
+     "a": {
+      "type": "string"
+     },
+     "b": {
+      "type": "string"
+     }
+    },
+    "type": "object"
+   },
+   "expect": {
+    "short": "fields:\n  a?: string\n  b?: string\njson:\n  allOf:\n    - oneOf:\n        - properties:\n            a:\n              minLength: 1\n          required: [a]\n        - properties:\n            b:\n              minLength: 1\n          required: [b]\n      x-rule: one_of(a, b)\n    - required: [a]\n"
+   },
+   "name": "generate-allof-mixed",
    "schema": "t"
   }
  ],
