@@ -38,7 +38,7 @@ A release is made by pushing a tag `v<version>` matching the workspace version i
 | `legible generate <schema.json>` | Writes a JSON Schema back as canonical short form |
 | `legible lint <schema>` | Checks a published type against the published subset |
 | `legible check-compat <old> <new>` | Lists changes that would break readers or writers of the old version |
-| `legible validate -s <schema> <record.json>…` | Validates records against their types, chosen by `$type` and `version` |
+| `legible validate -s <schema> <record.json>…` | Validates records against their types, chosen by `$type` and `version`; a broken rule is reported by rule, with its own message |
 | `legible record hash <record.json>…` | Prints each record's content hash, the SHA-256 of its canonical line without `produced_by` and `source`: what an external reference's `sha256` pins |
 | `legible bundle pack <file or dir>… -o <bundle.zip>` | Packs records and attachments into a bundle |
 | `legible bundle verify <bundle> [-i <identity>] [--pin …] [--key-set …]` | Checks a bundle's hashes, file list, references and signature; decrypts an encrypted one with `-i` |
@@ -73,6 +73,8 @@ Exit 0 from `verify` doesn't mean a signature was checked. A signed bundle given
 `keys sign` signs a key set with a key already in the set readers hold, which endorses the new set (for example one that adds the next key). It warns when the key isn't in the set it signs.
 
 Exit status is 0 when everything passes, 1 when the input has problems, and 2 when the tool couldn't run. `validate` never fetches anything: every schema it needs is given with `-s`, and `org.legiblerecords.common` version 1 is built in.
+
+`validate` prints each failure as `<file>: <pointer>: <message>`. A type's own keywords fail with the validator's message; a rule (an `allOf` member with `x-rule`, written under `rules` in the short form) fails as one line with the rule's message and the pointer of the object it sits on, such as `/approvals/1: needs exactly one of at and on` or `/: opened_on 2026-02-01 isn't before closed_on 2026-01-31`, after the type's own failures.
 
 ### Bundles
 

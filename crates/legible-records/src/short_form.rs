@@ -12,6 +12,8 @@ use crate::yaml::{emit_string, is_json_number, parse_restricted_with_lines};
 
 mod rules;
 
+#[cfg(feature = "validate")]
+pub(crate) use rules::path_kind;
 pub(crate) use rules::{rule_entry, rule_holder, NoMembers};
 pub use rules::{rule_kind, rule_member};
 

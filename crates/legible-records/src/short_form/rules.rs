@@ -71,6 +71,21 @@ pub fn rule_kind(property: &Value) -> Option<Kind> {
     }
 }
 
+/// The kind of the value at `path`, a field or a key such as
+/// `history[].since`, from the expanded `properties` of the object a rule
+/// sits on, in a schema with these `$defs`: [`rule_kind`] of the property
+/// the path ends at, resolved as the rule's checks resolve it. `None` when
+/// the path doesn't resolve or its property has no kind.
+#[cfg_attr(not(feature = "validate"), allow(dead_code))]
+pub(crate) fn path_kind(
+    path: &str,
+    properties: &Map<String, Value>,
+    defs: &Map<String, Value>,
+) -> Option<Kind> {
+    let steps = resolve(path, properties, defs).ok()?;
+    steps.last().and_then(|(_, property)| rule_kind(property))
+}
+
 /// Why an object's `allOf` can't hold rule members.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NoMembers {

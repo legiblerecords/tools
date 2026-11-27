@@ -89,6 +89,23 @@ These come from `org.legiblerecords.common`, which `legible` has built in. A typ
 | `source` | `{ "system": "...", "refs": [...], "as_of": "<date-time>" }`: needs `system` |
 | `ref(kind)` | A string `"<kind>:<id>"`, such as `"person:ana-lima"`, resolving to a record in the same bundle |
 
+### Rules
+
+A type can relate fields with `rules`, beside `fields`. `legible validate` reports a broken rule as one line, with the rule's message and the pointer of the object it sits on, such as `/approvals/1: needs exactly one of at and on`. Fix the record, not the type.
+
+| Rule | Holds when |
+|---|---|
+| `one_of(a, b, …)` | exactly one of the fields is given |
+| `at_most_one(a, b)` | not both are given |
+| `any_of(a, b, …)` | at least one is given |
+| `requires(<when>, <then>)` | whenever `<when>` holds, `<then>` holds; a condition is `a`, `a = v`, `a in (v, w)`, `not …` or `any_of(a, b)` |
+| `before(a, b)`, `not_after(a, b)` | `a` is less than `b` (or, for `not_after`, no greater), as numbers, dates or datetimes, when both are given |
+| `ascending(list, key)` | the items are in increasing order of `key`; every item has it |
+| `unique(list, key)` | no two items share a `key` |
+| `within(path, path)` | every value at the first path is among those at the second, as in `within(statements[].estimates[].expert, experts[].id)` |
+
+A field is given when it is present and isn't an empty list or, for a plain string, an empty string.
+
 ## Before you hand it over, report
 
 - What the bundle holds: a count per type.

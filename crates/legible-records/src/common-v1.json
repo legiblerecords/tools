@@ -99,6 +99,33 @@
       "type": "object"
     },
     "personMatch": {
+      "allOf": [
+        {
+          "anyOf": [
+            {
+              "properties": {
+                "emails": {
+                  "minItems": 1
+                }
+              },
+              "required": [
+                "emails"
+              ]
+            },
+            {
+              "properties": {
+                "identifiers": {
+                  "minItems": 1
+                }
+              },
+              "required": [
+                "identifiers"
+              ]
+            }
+          ],
+          "x-rule": "any_of(emails, identifiers)"
+        }
+      ],
       "description": "What a publisher knows about the person a record is about, for a reader to match against the people it holds. Needs emails or identifiers, or both.",
       "properties": {
         "emails": {

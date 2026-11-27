@@ -75,6 +75,54 @@ fn zip_entry(zip: &Path, name: &str) -> Vec<u8> {
 }
 
 #[test]
+fn validate_names_a_broken_rule_by_its_message() {
+    let dir = Temp::new("validate-rule");
+    let schema = dir.path("window.json");
+    std::fs::write(
+        &schema,
+        serde_json::json!({
+            "$id": "https://example.org/schemas/org.example.window/v1.json",
+            "type": "object",
+            "properties": {
+                "$type": {"const": "org.example.window"},
+                "version": {"const": 1},
+                "opened_on": {"$ref": format!("{}#/$defs/date", legible_records::COMMON_V1_ID)},
+                "closed_on": {"$ref": format!("{}#/$defs/date", legible_records::COMMON_V1_ID)}
+            },
+            "required": ["$type", "version"],
+            "allOf": [{"x-rule": "before(opened_on, closed_on)"}]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let good = dir.path("good.json");
+    std::fs::write(
+        &good,
+        r#"{"$type": "org.example.window", "version": 1, "opened_on": "2026-01-01", "closed_on": "2026-01-02"}"#,
+    )
+    .unwrap();
+    let bad = dir.path("bad.json");
+    std::fs::write(
+        &bad,
+        r#"{"$type": "org.example.window", "version": 1, "opened_on": "2026-02-01", "closed_on": "2026-01-31"}"#,
+    )
+    .unwrap();
+
+    let result = legible(&[arg("validate"), arg("--schema"), &schema, &good]);
+    assert!(result.status.success(), "{result:?}");
+
+    let result = legible(&[arg("validate"), arg("--schema"), &schema, &good, &bad]);
+    assert_eq!(result.status.code(), Some(1), "{result:?}");
+    assert_eq!(
+        text(&result.stdout),
+        format!(
+            "{}: /: opened_on 2026-02-01 isn't before closed_on 2026-01-31\n",
+            bad.display()
+        )
+    );
+}
+
+#[test]
 fn bundle_and_identity_cannot_both_be_stdin() {
     for sub in ["verify", "unpack"] {
         let mut args = vec![arg("bundle"), arg(sub), arg("-"), arg("-i"), arg("-")];

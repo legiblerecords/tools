@@ -2,6 +2,7 @@
 //! legiblerecords/spec; see tests/vectors/SOURCE).
 
 use legible_records::short_form::{expand, generate, Options};
+use legible_records::validate::Schemas;
 use legible_records::yaml::parse_restricted;
 use serde_json::{json, Value};
 
@@ -116,4 +117,83 @@ fn generation_round_trips() {
             );
         }
     }
+}
+
+/// `schema` without its rule members: each `allOf` entry with `x-rule`
+/// taken out, and an `allOf` that empties dropped.
+fn without_rules(schema: &Value) -> Value {
+    match schema {
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (key, value) in map {
+                if key == "allOf" {
+                    if let Value::Array(entries) = value {
+                        let kept: Vec<Value> = entries
+                            .iter()
+                            .filter(|e| e.get("x-rule").is_none())
+                            .map(without_rules)
+                            .collect();
+                        if !kept.is_empty() {
+                            out.insert(key.clone(), Value::Array(kept));
+                        }
+                        continue;
+                    }
+                }
+                out.insert(key.clone(), without_rules(value));
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(without_rules).collect()),
+        other => other.clone(),
+    }
+}
+
+#[test]
+fn rules_vectors() {
+    // Each record's failures are the type's own, then exactly the rule
+    // failures the vector lists, in order.
+    let mut failures = Vec::new();
+    let cases = load("rules.json");
+    let mut records = 0;
+    for case in &cases {
+        let name = case["name"].as_str().unwrap();
+        let options = options(case);
+        let mut schema = expand(case["short"].as_str().unwrap(), "t", &options)
+            .unwrap_or_else(|p| panic!("{name}: {p:?}"));
+        if schema.get("$id").is_none() {
+            schema["$id"] = json!("https://example.org/t.json");
+        }
+        let schemas = Schemas::default();
+        let own_schema = without_rules(&schema);
+        for (n, entry) in case["records"].as_array().unwrap().iter().enumerate() {
+            records += 1;
+            let record = &entry["record"];
+            let own = schemas.validate(&own_schema, record).unwrap();
+            let got = schemas
+                .validate(&schema, record)
+                .unwrap_or_else(|e| panic!("{name} record {n}: {e}"));
+            let mut want: Vec<Value> = own
+                .iter()
+                .map(|f| json!({"pointer": f.pointer, "message": f.message}))
+                .collect();
+            want.extend(entry["failures"].as_array().unwrap().iter().cloned());
+            let got: Vec<Value> = got
+                .iter()
+                .map(|f| json!({"pointer": f.pointer, "message": f.message}))
+                .collect();
+            if got != want {
+                failures.push(format!(
+                    "{name} record {n}:\n  expected {}\n  got      {}",
+                    Value::from(want),
+                    Value::from(got)
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {records} records in rules.json failed:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }
