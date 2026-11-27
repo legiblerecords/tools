@@ -123,6 +123,111 @@ fn validate_names_a_broken_rule_by_its_message() {
 }
 
 #[test]
+fn validate_reads_ndjson_one_record_per_line() {
+    let dir = Temp::new("validate-ndjson");
+    let schema = dir.path("window.json");
+    std::fs::write(
+        &schema,
+        serde_json::json!({
+            "$id": "https://example.org/schemas/org.example.window/v1.json",
+            "type": "object",
+            "properties": {
+                "$type": {"const": "org.example.window"},
+                "version": {"const": 1},
+                "opened_on": {"$ref": format!("{}#/$defs/date", legible_records::COMMON_V1_ID)}
+            },
+            "required": ["$type", "version", "opened_on"]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let good = r#"{"$type": "org.example.window", "version": 1, "opened_on": "2026-01-01"}"#;
+
+    // Blank lines, CRLF endings and no final newline are all fine.
+    let clean = dir.path("clean.ndjson");
+    std::fs::write(&clean, format!("{good}\r\n\n{good}")).unwrap();
+    let result = legible(&[arg("validate"), arg("-s"), &schema, &clean]);
+    assert!(result.status.success(), "{result:?}");
+
+    // Each line is checked on its own, and every problem names its line.
+    let mixed = dir.path("mixed.NDJSON");
+    std::fs::write(
+        &mixed,
+        format!(
+            "{good}\n{}\n\n{}\nnot json\n{good}\n",
+            r#"{"$type": "org.example.window", "version": 1}"#,
+            r#"{"$type": "org.example.other", "version": 2}"#,
+        ),
+    )
+    .unwrap();
+    let result = legible(&[arg("validate"), arg("-s"), &schema, &mixed]);
+    assert_eq!(result.status.code(), Some(1), "{result:?}");
+    let out = text(&result.stdout);
+    let lines: Vec<&str> = out.lines().collect();
+    let name = mixed.display().to_string();
+    assert_eq!(lines.len(), 3, "{out}");
+    assert!(
+        lines[0].starts_with(&format!("{name}: line 2: /: ")) && lines[0].contains("opened_on"),
+        "{out}"
+    );
+    assert!(
+        lines[1].starts_with(&format!(
+            "{name}: line 4: no schema given for \"org.example.other\" version 2"
+        )),
+        "{out}"
+    );
+    assert!(
+        lines[2].starts_with(&format!("{name}: line 5: not JSON: ")),
+        "{out}"
+    );
+}
+
+#[test]
+fn validate_reports_a_json_file_that_isnt_json_and_goes_on() {
+    let dir = Temp::new("validate-not-json");
+    let schema = dir.path("thing.json");
+    std::fs::write(
+        &schema,
+        serde_json::json!({
+            "$id": "https://example.org/schemas/org.example.thing/v1.json",
+            "type": "object",
+            "properties": {
+                "$type": {"const": "org.example.thing"},
+                "version": {"const": 1}
+            },
+            "required": ["$type", "version"]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let broken = dir.path("broken.json");
+    std::fs::write(&broken, "{not json").unwrap();
+    let other = dir.path("other.json");
+    std::fs::write(&other, r#"{"$type": "org.example.other", "version": 1}"#).unwrap();
+
+    // A record that isn't JSON is a problem with the input (exit 1), and the
+    // files after it are still checked.
+    let result = legible(&[arg("validate"), arg("-s"), &schema, &broken, &other]);
+    assert_eq!(result.status.code(), Some(1), "{result:?}");
+    let out = text(&result.stdout);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 2, "{out}");
+    assert!(
+        lines[0].starts_with(&format!("{}: not JSON: ", broken.display())),
+        "{out}"
+    );
+    assert!(
+        lines[1].starts_with(&format!("{}: no schema given", other.display())),
+        "{out}"
+    );
+
+    // A record file that can't be read at all still stops the tool.
+    let missing = dir.path("missing.json");
+    let result = legible(&[arg("validate"), arg("-s"), &schema, &missing]);
+    assert_eq!(result.status.code(), Some(2), "{result:?}");
+}
+
+#[test]
 fn bundle_and_identity_cannot_both_be_stdin() {
     for sub in ["verify", "unpack"] {
         let mut args = vec![arg("bundle"), arg(sub), arg("-"), arg("-i"), arg("-")];

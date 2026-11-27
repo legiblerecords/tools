@@ -28,7 +28,7 @@ Usage:
   legible generate <schema.json> [schema options]
   legible lint <schema.yaml|.json> [schema options]
   legible check-compat <old> <new> [schema options]
-  legible validate -s <schema>... <record.json>... [schema options]
+  legible validate -s <schema>... <record.json|.ndjson>... [schema options]
   legible record hash <record.json>...
   legible bundle pack <file|dir>... -o <bundle> [-s <schema>]... [--set <kind>]... [--no-sets] [encryption]
   legible bundle unpack <bundle> -d <dir> [-s <schema>]... [-i <identity>] [trust]
@@ -379,6 +379,25 @@ function schemaFor(schemas, record) {
   );
 }
 
+/**
+ * The records a file holds, each with where it is: a .json file holds one, a
+ * .ndjson file one per line (blank lines skipped). A record that isn't JSON
+ * comes back with its error, so the records after it are still checked; a file
+ * that can't be read stops the tool.
+ */
+function records(file) {
+  const parse = (at, text) => {
+    try {
+      return { at, record: JSON.parse(text) };
+    } catch (e) {
+      return { at, error: message(e) };
+    }
+  };
+  const text = readInput(file).toString("utf8");
+  if (!/\.ndjson$/i.test(file)) return [parse(file, text)];
+  return text.split("\n").flatMap((line, i) => (line.trim() ? [parse(`${file}: line ${i + 1}`, line)] : []));
+}
+
 async function validate(schemas, files) {
   const { default: Ajv2020 } = await import("ajv/dist/2020.js");
   const { default: addFormats } = await import("ajv-formats");
@@ -398,12 +417,16 @@ async function validate(schemas, files) {
     }
   }
   let ok = true;
-  for (const file of files) {
-    const record = readJson(file);
+  for (const { at, record, error } of files.flatMap(records)) {
+    if (error) {
+      ok = false;
+      console.log(`${at}: not JSON: ${error}`);
+      continue;
+    }
     const schema = schemaFor([...schemas, common], record);
     if (!schema) {
       ok = false;
-      console.log(`${file}: no schema given for ${JSON.stringify(record?.$type ?? "no $type")} version ${JSON.stringify(record?.version ?? "no version")} (common is ${common.$id})`);
+      console.log(`${at}: no schema given for ${JSON.stringify(record?.$type ?? "no $type")} version ${JSON.stringify(record?.version ?? "no version")} (common is ${common.$id})`);
       continue;
     }
     let check;
@@ -414,7 +437,7 @@ async function validate(schemas, files) {
     }
     if (!check(record)) {
       ok = false;
-      for (const error of check.errors) console.log(`${file}: ${error.instancePath || "/"}: ${error.message}`);
+      for (const error of check.errors) console.log(`${at}: ${error.instancePath || "/"}: ${error.message}`);
     }
   }
   if (!ok) throw new Problems();

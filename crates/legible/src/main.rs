@@ -64,7 +64,7 @@ enum Command {
         /// version 1 is always included. Nothing is fetched from the network.
         #[arg(long = "schema", short = 's', required = true)]
         schemas: Vec<PathBuf>,
-        /// Record files (.json).
+        /// Record files: .json holds one record, .ndjson one per line.
         #[arg(required = true)]
         records: Vec<PathBuf>,
         #[command(flatten)]
@@ -366,33 +366,53 @@ fn run(command: Command) -> Result<(), Stop> {
             }
             let mut ok = true;
             for path in &records {
-                let record = read_json(path)?;
-                let Some(type_schema) = set.for_record(&record) else {
-                    ok = false;
-                    let kind = record
-                        .get("$type")
-                        .map_or("no $type".to_owned(), Value::to_string);
-                    let version = record
-                        .get("version")
-                        .map_or("no version".to_owned(), Value::to_string);
-                    println!(
-                        "{}: no schema given for {kind} version {version} (common is {COMMON_V1_ID})",
-                        path.display()
-                    );
-                    continue;
+                // A .ndjson file holds one record per line; blank lines are skipped. A
+                // record that isn't JSON is a problem with the input, reported below;
+                // a file that can't be read stops the tool.
+                let given: Vec<(String, Result<Value, String>)> = if is_ndjson(path) {
+                    read(path)?
+                        .split('\n')
+                        .enumerate()
+                        .filter(|(_, line)| !line.trim().is_empty())
+                        .map(|(i, line)| {
+                            let at = format!("{}: line {}", path.display(), i + 1);
+                            (at, serde_json::from_str(line).map_err(|e| e.to_string()))
+                        })
+                        .collect()
+                } else {
+                    let record = serde_json::from_str(&read(path)?).map_err(|e| e.to_string());
+                    vec![(path.display().to_string(), record)]
                 };
-                let failures = set
-                    .validate(type_schema, &record)
-                    .map_err(|e| Stop::Failed(e.to_string()))?;
-                for failure in &failures {
-                    println!(
-                        "{}: {}: {}",
-                        path.display(),
-                        pointer(&failure.pointer),
-                        failure.message
-                    );
+                for (at, record) in given {
+                    let record = match record {
+                        Ok(record) => record,
+                        Err(e) => {
+                            ok = false;
+                            println!("{at}: not JSON: {e}");
+                            continue;
+                        }
+                    };
+                    let Some(type_schema) = set.for_record(&record) else {
+                        ok = false;
+                        let kind = record
+                            .get("$type")
+                            .map_or("no $type".to_owned(), Value::to_string);
+                        let version = record
+                            .get("version")
+                            .map_or("no version".to_owned(), Value::to_string);
+                        println!(
+                            "{at}: no schema given for {kind} version {version} (common is {COMMON_V1_ID})"
+                        );
+                        continue;
+                    };
+                    let failures = set
+                        .validate(type_schema, &record)
+                        .map_err(|e| Stop::Failed(e.to_string()))?;
+                    for failure in &failures {
+                        println!("{at}: {}: {}", pointer(&failure.pointer), failure.message);
+                    }
+                    ok &= failures.is_empty();
                 }
-                ok &= failures.is_empty();
             }
             outcome(ok)
         }
@@ -792,6 +812,13 @@ fn pointer(pointer: &str) -> &str {
 
 fn read(path: &Path) -> Result<String, Stop> {
     std::fs::read_to_string(path).map_err(|e| Stop::Failed(format!("{}: {e}", path.display())))
+}
+
+/// Whether a record file is NDJSON, one record per line, by its extension.
+fn is_ndjson(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("ndjson"))
 }
 
 fn read_json(path: &Path) -> Result<Value, Stop> {
