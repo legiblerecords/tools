@@ -11,7 +11,7 @@
 //! the rule's message.
 
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 
 use jsonschema::{Retrieve, Uri, Validator};
@@ -102,16 +102,31 @@ impl Schemas {
     /// order (an object before the ones inside it, members in property name
     /// order, items in index order), then in the order of the rules on one
     /// object. `unique` and `within` fail once for each offending value.
+    ///
+    /// A rule is checked by rule where the walk reaches it, through
+    /// `properties`, `items`, `$ref`s, plain `allOf` entries and an `anyOf`
+    /// that only adds `null`. A rule member a validator can also reach
+    /// another way, such as through a union, stays in the type's keywords
+    /// and fails there, with the validator's message.
+    ///
+    /// A malformed `x-rule` is reported, as a [`SchemaError`], only when a
+    /// record reaches the object it sits on; `legible lint` checks every
+    /// member.
     pub fn validate(&self, schema: &Value, record: &Value) -> Result<Vec<Failure>, SchemaError> {
+        let graph = Graph {
+            set: &self.by_id,
+            root: schema,
+        };
+        let checked = graph.checked();
         let stripped: BTreeMap<String, Value> = self
             .by_id
             .iter()
-            .map(|(id, schema)| (id.clone(), without_rules(schema)))
+            .map(|(id, schema)| (id.clone(), without_rules(schema, &checked)))
             .collect();
         let validator = jsonschema::options()
             .should_validate_formats(true)
             .with_retriever(SetRetriever(stripped))
-            .build(&without_rules(schema))
+            .build(&without_rules(schema, &checked))
             .map_err(|error| SchemaError(format!("the schema doesn't compile: {error}")))?;
         let mut failures: Vec<Failure> = validator
             .iter_errors(record)
@@ -121,8 +136,8 @@ impl Schemas {
             })
             .collect();
         let mut walk = Walk {
-            set: &self.by_id,
-            root: schema,
+            graph,
+            checked,
             members: HashMap::new(),
             failures: Vec::new(),
         };
@@ -144,44 +159,10 @@ fn is_rule_member(entry: &Value) -> bool {
     entry.get("x-rule").is_some()
 }
 
-/// `schema` without its rule members: each `allOf` entry with `x-rule`
-/// taken out wherever it is, and an `allOf` that empties dropped. Values
-/// that are data rather than schemas (`const`, `enum`, `examples`,
-/// `default`) are kept as they are.
-fn without_rules(schema: &Value) -> Value {
-    let Value::Object(map) = schema else {
-        return schema.clone();
-    };
-    let mut out = Map::new();
-    for (key, value) in map {
-        let value = match (key.as_str(), value) {
-            ("const" | "enum" | "examples" | "default", _) => value.clone(),
-            ("allOf", Value::Array(entries)) => {
-                let kept: Vec<Value> = entries
-                    .iter()
-                    .filter(|entry| !is_rule_member(entry))
-                    .map(without_rules)
-                    .collect();
-                if kept.is_empty() {
-                    continue;
-                }
-                Value::Array(kept)
-            }
-            (
-                "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas",
-                Value::Object(names),
-            ) => Value::Object(
-                names
-                    .iter()
-                    .map(|(name, schema)| (name.clone(), without_rules(schema)))
-                    .collect(),
-            ),
-            (_, Value::Array(items)) => Value::Array(items.iter().map(without_rules).collect()),
-            (_, other) => without_rules(other),
-        };
-        out.insert(key.clone(), value);
-    }
-    Value::Object(out)
+/// A node's address, which tells nodes apart: the same node reached twice
+/// has the same address.
+fn address(node: &Value) -> usize {
+    node as *const Value as usize
 }
 
 /// A schema node, with the document it is in, for its local `$ref`s and
@@ -192,113 +173,168 @@ struct At<'s> {
     node: &'s Value,
 }
 
-/// Walks a record and its schema together, checking the rule members of
-/// each object's schema.
-struct Walk<'s> {
-    /// The schemas `$ref`s resolve from, with their rule members.
+/// The applicators the rule walk follows from one node, and nothing else:
+/// the nodes that apply to the same value (`$ref`, `allOf` entries other
+/// than rule members, and the other member of an `anyOf` that only adds
+/// `null`), those that apply to a member (`properties`), and the one that
+/// applies to each item (`items`, as a schema). Stripping rule members and
+/// the walk both go by this, so a rule member is taken out of the type's
+/// keywords exactly where the walk checks it.
+struct Followed<'s> {
+    same: Vec<At<'s>>,
+    properties: Vec<(&'s str, At<'s>)>,
+    items: Option<At<'s>>,
+}
+
+/// The schemas a validation resolves `$ref`s from.
+#[derive(Clone, Copy)]
+struct Graph<'s> {
+    /// The set's schemas, with their rule members.
     set: &'s BTreeMap<String, Value>,
     /// The type's schema, which needn't be in the set.
     root: &'s Value,
-    /// Standard shapes' members, compiled, by their address.
-    members: HashMap<usize, Validator>,
-    failures: Vec<Failure>,
 }
 
-impl<'s> Walk<'s> {
-    /// Checks the value at `pointer` against the schema nodes that apply to
-    /// it, then the values inside it, members in property name order and
-    /// items in index order.
-    fn instance(
-        &mut self,
-        nodes: Vec<At<'s>>,
-        value: &Value,
-        pointer: &str,
-    ) -> Result<(), SchemaError> {
-        let nodes = self.applying(nodes);
-        match value {
-            Value::Object(map) => {
-                for at in &nodes {
-                    self.rules(*at, value, pointer)?;
-                }
-                let mut names: Vec<&String> = map.keys().collect();
-                names.sort();
-                for name in names {
-                    let inner: Vec<At<'s>> = nodes
-                        .iter()
-                        .filter_map(|at| {
-                            let node = at.node.get("properties")?.get(name.as_str())?;
-                            Some(At { doc: at.doc, node })
-                        })
-                        .collect();
-                    if !inner.is_empty() {
-                        let step = name.replace('~', "~0").replace('/', "~1");
-                        self.instance(inner, &map[name.as_str()], &format!("{pointer}/{step}"))?;
-                    }
-                }
-            }
-            Value::Array(items) => {
-                let inner: Vec<At<'s>> = nodes
-                    .iter()
-                    .filter_map(|at| {
-                        let node = at.node.get("items").filter(|items| items.is_object())?;
-                        Some(At { doc: at.doc, node })
-                    })
-                    .collect();
-                if !inner.is_empty() {
-                    for (index, item) in items.iter().enumerate() {
-                        self.instance(inner.clone(), item, &format!("{pointer}/{index}"))?;
-                    }
-                }
-            }
-            _ => {}
+impl<'s> Graph<'s> {
+    fn followed(&self, at: At<'s>) -> Followed<'s> {
+        let mut same = Vec::new();
+        if let Some(target) = at.node.get("$ref").and_then(Value::as_str) {
+            same.extend(self.resolve(at, target));
         }
-        Ok(())
+        if let Some(Value::Array(entries)) = at.node.get("allOf") {
+            same.extend(
+                entries
+                    .iter()
+                    .filter(|entry| entry.is_object() && !is_rule_member(entry))
+                    .map(|node| At { doc: at.doc, node }),
+            );
+        }
+        if let Some(Value::Array(members)) = at.node.get("anyOf") {
+            let is_null = |m: &Value| *m == serde_json::json!({"type": "null"});
+            if let [a, b] = &members[..] {
+                match (is_null(a), is_null(b)) {
+                    (false, true) => same.push(At {
+                        doc: at.doc,
+                        node: a,
+                    }),
+                    (true, false) => same.push(At {
+                        doc: at.doc,
+                        node: b,
+                    }),
+                    _ => {}
+                }
+            }
+        }
+        let properties = match at.node.get("properties") {
+            Some(Value::Object(names)) => names
+                .iter()
+                .filter(|(_, node)| node.is_object())
+                .map(|(name, node)| (name.as_str(), At { doc: at.doc, node }))
+                .collect(),
+            _ => Vec::new(),
+        };
+        let items = at
+            .node
+            .get("items")
+            .filter(|items| items.is_object())
+            .map(|node| At { doc: at.doc, node });
+        Followed {
+            same,
+            properties,
+            items,
+        }
     }
 
-    /// Every node that applies at one value: the given ones, what their
-    /// `$ref`s point at, their `allOf` entries other than rule members, and
-    /// the other member of an `anyOf` that only adds `null`. Each once.
-    fn applying(&self, nodes: Vec<At<'s>>) -> Vec<At<'s>> {
-        let mut out: Vec<At<'s>> = Vec::new();
-        let mut pending = nodes;
-        pending.reverse();
+    /// Every subschema a JSON Schema validator may apply from a node,
+    /// followed by the walk or not.
+    fn subschemas(&self, at: At<'s>) -> Vec<At<'s>> {
+        let mut out = Vec::new();
+        let node = |n: &'s Value| At {
+            doc: at.doc,
+            node: n,
+        };
+        if let Some(target) = at.node.get("$ref").and_then(Value::as_str) {
+            out.extend(self.resolve(at, target));
+        }
+        for key in ["properties", "patternProperties", "dependentSchemas"] {
+            if let Some(Value::Object(names)) = at.node.get(key) {
+                out.extend(names.values().map(node));
+            }
+        }
+        for key in [
+            "allOf",
+            "anyOf",
+            "oneOf",
+            "prefixItems",
+            "items",
+            "not",
+            "if",
+            "then",
+            "else",
+            "additionalProperties",
+            "additionalItems",
+            "contains",
+            "propertyNames",
+            "unevaluatedItems",
+            "unevaluatedProperties",
+        ] {
+            match at.node.get(key) {
+                Some(Value::Array(list)) => out.extend(list.iter().map(node)),
+                Some(one) => out.push(node(one)),
+                None => {}
+            }
+        }
+        out.retain(|at| at.node.is_object());
+        out
+    }
+
+    /// The nodes whose rule members the walk checks: those it reaches from
+    /// the root through [`Graph::followed`], less those a validator can also
+    /// reach through any other applicator. Those keep their rule members in
+    /// the type's keywords, and fail there.
+    fn checked(&self) -> HashSet<usize> {
+        let root = At {
+            doc: self.root,
+            node: self.root,
+        };
+        let mut walked = HashSet::new();
+        let mut pending = vec![root];
         while let Some(at) = pending.pop() {
-            if out.iter().any(|seen| std::ptr::eq(seen.node, at.node)) {
+            if !walked.insert(address(at.node)) {
                 continue;
             }
-            out.push(at);
-            let mut next: Vec<At<'s>> = Vec::new();
-            if let Some(target) = at.node.get("$ref").and_then(Value::as_str) {
-                next.extend(self.resolve(at, target));
-            }
-            if let Some(Value::Array(entries)) = at.node.get("allOf") {
-                next.extend(
-                    entries
-                        .iter()
-                        .filter(|entry| entry.is_object() && !is_rule_member(entry))
-                        .map(|node| At { doc: at.doc, node }),
-                );
-            }
-            if let Some(Value::Array(members)) = at.node.get("anyOf") {
-                let null = serde_json::json!({"type": "null"});
-                let others: Vec<&Value> = members.iter().filter(|m| **m != null).collect();
-                if let [only] = others[..] {
-                    if members.len() > 1 {
-                        next.push(At {
-                            doc: at.doc,
-                            node: only,
-                        });
-                    }
-                }
-            }
-            pending.extend(next.into_iter().rev());
+            let followed = self.followed(at);
+            pending.extend(followed.same);
+            pending.extend(followed.properties.into_iter().map(|(_, at)| at));
+            pending.extend(followed.items);
         }
-        out
+        // Reached with `true`: through at least one applicator the walk
+        // doesn't follow.
+        let mut seen: HashSet<(usize, bool)> = HashSet::new();
+        let mut elsewhere = HashSet::new();
+        let mut pending = vec![(root, false)];
+        while let Some((at, off)) = pending.pop() {
+            if !seen.insert((address(at.node), off)) {
+                continue;
+            }
+            if off {
+                elsewhere.insert(address(at.node));
+            }
+            let followed = self.followed(at);
+            let mut on: HashSet<usize> = followed.same.iter().map(|at| address(at.node)).collect();
+            on.extend(followed.properties.iter().map(|(_, at)| address(at.node)));
+            on.extend(followed.items.iter().map(|at| address(at.node)));
+            for inner in self.subschemas(at) {
+                pending.push((inner, off || !on.contains(&address(inner.node))));
+            }
+        }
+        walked.retain(|node| !elsewhere.contains(node));
+        walked
     }
 
     /// The node a `$ref` from `at` points at: a JSON pointer into its own
     /// document, or into a schema of the set, or the type's schema, by
-    /// `$id`. `None` for what isn't there, which compiling has refused.
+    /// `$id`. `None` for what isn't there, which compiling refuses.
     fn resolve(&self, at: At<'s>, target: &str) -> Option<At<'s>> {
         let (base, fragment) = target.split_once('#').unwrap_or((target, ""));
         let doc = if base.is_empty() {
@@ -317,6 +353,111 @@ impl<'s> Walk<'s> {
             _ => return None,
         };
         Some(At { doc, node })
+    }
+}
+
+/// A copy of `value` with the rule members taken out of the `allOf` of
+/// each node in `checked`, and an `allOf` that empties dropped.
+fn without_rules(value: &Value, checked: &HashSet<usize>) -> Value {
+    match value {
+        Value::Object(map) => {
+            let strip = checked.contains(&address(value));
+            let mut out = Map::new();
+            for (key, inner) in map {
+                if let ("allOf", true, Value::Array(entries)) = (key.as_str(), strip, inner) {
+                    let kept: Vec<Value> = entries
+                        .iter()
+                        .filter(|entry| !is_rule_member(entry))
+                        .map(|entry| without_rules(entry, checked))
+                        .collect();
+                    if !kept.is_empty() {
+                        out.insert(key.clone(), Value::Array(kept));
+                    }
+                } else {
+                    out.insert(key.clone(), without_rules(inner, checked));
+                }
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => {
+            Value::Array(items.iter().map(|v| without_rules(v, checked)).collect())
+        }
+        other => other.clone(),
+    }
+}
+
+/// Walks a record and its schema together, checking the rule members of
+/// each object's schema.
+struct Walk<'s> {
+    graph: Graph<'s>,
+    /// The nodes whose rule members are checked here, not by keyword.
+    checked: HashSet<usize>,
+    /// Standard shapes' members, compiled, by their address.
+    members: HashMap<usize, Validator>,
+    failures: Vec<Failure>,
+}
+
+impl<'s> Walk<'s> {
+    /// Checks the value at `pointer` against the schema nodes that apply to
+    /// it, then the values inside it, members in property name order and
+    /// items in index order.
+    fn instance(
+        &mut self,
+        nodes: Vec<At<'s>>,
+        value: &Value,
+        pointer: &str,
+    ) -> Result<(), SchemaError> {
+        let nodes = self.applying(nodes);
+        let followed: Vec<Followed<'s>> = nodes.iter().map(|at| self.graph.followed(*at)).collect();
+        match value {
+            Value::Object(map) => {
+                for at in &nodes {
+                    if self.checked.contains(&address(at.node)) {
+                        self.rules(*at, value, pointer)?;
+                    }
+                }
+                let mut names: Vec<&String> = map.keys().collect();
+                names.sort();
+                for name in names {
+                    let inner: Vec<At<'s>> = followed
+                        .iter()
+                        .flat_map(|f| f.properties.iter())
+                        .filter(|(property, _)| *property == name.as_str())
+                        .map(|(_, at)| *at)
+                        .collect();
+                    if !inner.is_empty() {
+                        let step = name.replace('~', "~0").replace('/', "~1");
+                        self.instance(inner, &map[name.as_str()], &format!("{pointer}/{step}"))?;
+                    }
+                }
+            }
+            Value::Array(items) => {
+                let inner: Vec<At<'s>> = followed.iter().filter_map(|f| f.items).collect();
+                if !inner.is_empty() {
+                    for (index, item) in items.iter().enumerate() {
+                        self.instance(inner.clone(), item, &format!("{pointer}/{index}"))?;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Every node that applies at one value: the given ones and, through
+    /// [`Graph::followed`], those that apply to the same value. Each once.
+    fn applying(&self, nodes: Vec<At<'s>>) -> Vec<At<'s>> {
+        let mut out: Vec<At<'s>> = Vec::new();
+        let mut pending = nodes;
+        pending.reverse();
+        while let Some(at) = pending.pop() {
+            if out.iter().any(|seen| std::ptr::eq(seen.node, at.node)) {
+                continue;
+            }
+            out.push(at);
+            pending.extend(self.graph.followed(at).same.into_iter().rev());
+        }
+        out
     }
 
     /// Checks the rule members of `at`'s `allOf` on `object`, in order.
@@ -647,6 +788,41 @@ mod tests {
             failures(&schemas, &schema, &json!({"w": {}})),
             pairs(&[("/w", "needs a or b")])
         );
+    }
+
+    #[test]
+    fn a_rule_under_a_union_stays_in_the_types_own_keywords() {
+        // The walk doesn't follow an anyOf of a ref and a string, so the
+        // rule member stays in the compiled schema and fails there.
+        let schema = expanded(
+            "fields:\n  w: t.window | string\ndefs:\n  window:\n    fields:\n      \
+             a?: string\n      b?: string\n    rules:\n      - any_of(a, b)\n",
+        );
+        let schemas = Schemas::default();
+        assert_eq!(failures(&schemas, &schema, &json!({"w": "x"})), vec![]);
+        assert_eq!(
+            failures(&schemas, &schema, &json!({"w": {"a": "1"}})),
+            vec![]
+        );
+        let got = failures(&schemas, &schema, &json!({"w": {}}));
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].0, "/w");
+        assert_ne!(got[0].1, "needs a or b");
+    }
+
+    #[test]
+    fn a_def_also_reached_through_a_union_is_reported_once_by_keywords() {
+        // `window` is reached by the walk through `a` and by the validator
+        // alone through `b`'s union: its rule stays in the keywords, and
+        // isn't reported a second time by rule.
+        let schema = expanded(
+            "fields:\n  a: t.window\n  b: t.window | string\ndefs:\n  window:\n    \
+             fields:\n      x?: string\n      y?: string\n    rules:\n      - any_of(x, y)\n",
+        );
+        let got = failures(&Schemas::default(), &schema, &json!({"a": {}, "b": {}}));
+        let pointers: Vec<&str> = got.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(pointers, vec!["/a", "/b"], "{got:?}");
+        assert!(got.iter().all(|(_, m)| m != "needs x or y"), "{got:?}");
     }
 
     #[test]

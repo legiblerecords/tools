@@ -165,6 +165,7 @@ fn rules_vectors() {
         }
         let schemas = Schemas::default();
         let own_schema = without_rules(&schema);
+        let standard = standard_messages(&schema);
         for (n, entry) in case["records"].as_array().unwrap().iter().enumerate() {
             records += 1;
             let record = &entry["record"];
@@ -181,6 +182,22 @@ fn rules_vectors() {
                 .iter()
                 .map(|f| json!({"pointer": f.pointer, "message": f.message}))
                 .collect();
+            // A plain JSON Schema validator, given the expanded schema with
+            // its rule members, agrees: valid exactly when the type's own
+            // keywords pass and no standard shape fails. (Own shapes have no
+            // keywords, so it can't see them.)
+            let plain = plain_valid(&schema, record);
+            let none = own.is_empty()
+                && !entry["failures"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|f| standard.iter().any(|m| m == f["message"].as_str().unwrap()));
+            if plain != none {
+                failures.push(format!(
+                    "{name} record {n}: plain jsonschema says valid = {plain}, the vector and the type's own say {none}"
+                ));
+            }
             if got != want {
                 failures.push(format!(
                     "{name} record {n}:\n  expected {}\n  got      {}",
@@ -196,4 +213,51 @@ fn rules_vectors() {
         failures.len(),
         failures.join("\n")
     );
+}
+
+/// Resolves only org.legiblerecords.common version 1, as bundled.
+struct CommonOnly;
+
+impl jsonschema::Retrieve for CommonOnly {
+    fn retrieve(
+        &self,
+        uri: &jsonschema::Uri<String>,
+    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        let key = uri.as_str();
+        if key.split('#').next() == Some(legible_records::COMMON_V1_ID) {
+            Ok(serde_json::from_str(legible_records::COMMON_V1)?)
+        } else {
+            Err(format!("{key} isn't common v1").into())
+        }
+    }
+}
+
+/// Whether `record` is valid against `schema`, rule members and all, by a
+/// plain JSON Schema validator.
+fn plain_valid(schema: &Value, record: &Value) -> bool {
+    jsonschema::options()
+        .should_validate_formats(true)
+        .with_retriever(CommonOnly)
+        .build(schema)
+        .expect("the expanded schema compiles")
+        .is_valid(record)
+}
+
+/// The messages of the standard shapes among a schema's rule members.
+fn standard_messages(schema: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    match schema {
+        Value::Object(map) => {
+            if let Some(Value::String(text)) = map.get("x-rule") {
+                let rule = legible_records::rules::parse(text).unwrap();
+                if rule.is_standard() {
+                    out.push(legible_records::rules::message(&rule));
+                }
+            }
+            map.values().for_each(|v| out.extend(standard_messages(v)));
+        }
+        Value::Array(items) => items.iter().for_each(|v| out.extend(standard_messages(v))),
+        _ => {}
+    }
+    out
 }
