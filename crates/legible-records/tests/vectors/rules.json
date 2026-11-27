@@ -1071,6 +1071,72 @@
    "short": "fields:\n  boxes?:\n    items:\n      fields:\n        box: string\nrules:\n  - unique(boxes, box)\n"
   },
   {
+   "name": "unique-escapes-controls",
+   "options": {
+    "common": "https://legiblerecords.org/schemas/org.legiblerecords.common/v1.json"
+   },
+   "records": [
+    {
+     "failures": [],
+     "record": {
+      "experts": [
+       {
+        "id": "ann\nlee"
+       },
+       {
+        "id": "ann lee"
+       },
+       {
+        "id": "bob\u001b[31m"
+       },
+       {
+        "id": "bob"
+       }
+      ]
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "more than one item in experts has id ann\\nlee",
+       "pointer": ""
+      },
+      {
+       "message": "more than one item in experts has id bob\\u001b[31m",
+       "pointer": ""
+      },
+      {
+       "message": "more than one item in experts has id c:\\\\d",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "experts": [
+       {
+        "id": "ann\nlee"
+       },
+       {
+        "id": "bob\u001b[31m"
+       },
+       {
+        "id": "c:\\d"
+       },
+       {
+        "id": "ann\nlee"
+       },
+       {
+        "id": "bob\u001b[31m"
+       },
+       {
+        "id": "c:\\d"
+       }
+      ]
+     }
+    }
+   ],
+   "short": "fields:\n  experts:\n    items:\n      fields:\n        id?: string\nrules:\n  - unique(experts, id)\n"
+  },
+  {
    "name": "within",
    "options": {
     "common": "https://legiblerecords.org/schemas/org.legiblerecords.common/v1.json"

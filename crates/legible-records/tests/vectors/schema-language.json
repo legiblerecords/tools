@@ -2160,6 +2160,98 @@
   },
   {
    "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "allOf": [
+      {
+       "anyOf": [
+        {
+         "required": [
+          "a"
+         ]
+        },
+        {
+         "properties": {
+          "b": {
+           "minLength": 1
+          }
+         },
+         "required": [
+          "b"
+         ]
+        }
+       ],
+       "x-rule": "any_of(a, b)"
+      }
+     ],
+     "properties": {
+      "a": {
+       "format": "email",
+       "type": "string"
+      },
+      "b": {
+       "type": "string"
+      }
+     },
+     "type": "object"
+    }
+   },
+   "name": "rules-given-format-in-json",
+   "schema": "t",
+   "short": "fields:\n  a?:\n    type: string\n    json:\n      format: email\n  b?: string\nrules:\n  - any_of(a, b)\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "allOf": [
+      {
+       "anyOf": [
+        {
+         "required": [
+          "a"
+         ]
+        },
+        {
+         "properties": {
+          "b": {
+           "minLength": 1
+          }
+         },
+         "required": [
+          "b"
+         ]
+        }
+       ],
+       "x-rule": "any_of(a, b)"
+      }
+     ],
+     "properties": {
+      "a": {
+       "examples": [
+        "x",
+        "y"
+       ],
+       "type": "string"
+      },
+      "b": {
+       "examples": [
+        "x",
+        "y"
+       ],
+       "maxLength": 8,
+       "type": "string"
+      }
+     },
+     "type": "object"
+    }
+   },
+   "name": "rules-given-examples",
+   "schema": "t",
+   "short": "fields:\n  a?:\n    type: string\n    examples: [x, y]\n  b?:\n    type: string\n    examples: [x, y]\n    json:\n      maxLength: 8\nrules:\n  - any_of(a, b)\n"
+  },
+  {
+   "expect": {
     "problems": [
      {
       "line": 2,
