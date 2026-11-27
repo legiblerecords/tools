@@ -136,7 +136,14 @@ jobs:
           version=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/"/, "", $3); print $3; exit }' Cargo.lock)
           echo "wasm-bindgen $version"
           cargo install wasm-bindgen-cli --version "$version" --locked
-      - run: sudo apt-get update && sudo apt-get install -y binaryen
+      # binaryen pinned: Ubuntu 24.04's package (version 108) corrupts the
+      # externref table wasm-bindgen emits, and the module then won't load.
+      - name: Install binaryen (wasm-opt) version_123
+        run: |
+          curl -fsSLo /tmp/binaryen.tar.gz https://github.com/WebAssembly/binaryen/releases/download/version_123/binaryen-version_123-x86_64-linux.tar.gz
+          echo "e959f2170af4c20c552e9de3a0253704d6a9d2766e8fdb88e4d6ac4bae9388fe  /tmp/binaryen.tar.gz" | sha256sum -c
+          tar -xzf /tmp/binaryen.tar.gz -C /tmp
+          echo /tmp/binaryen-version_123/bin >> "$GITHUB_PATH"
       - run: npm ci --ignore-scripts
         working-directory: packages/legible
       - run: npm run build
