@@ -54,6 +54,7 @@ fn node(
     upper_bound(old, new, pointer, "maxItems", breaks);
     enums(old, new, pointer, breaks);
     required(old, new, pointer, breaks);
+    rules(old, new, pointer, breaks);
     if old.get("additionalProperties") != Some(&Value::Bool(false))
         && new.get("additionalProperties") == Some(&Value::Bool(false))
     {
@@ -275,6 +276,35 @@ fn required(
     }
 }
 
+/// Rules are compared by their `x-rule` text: one that `new` has and `old`
+/// doesn't is added, which breaks; one removed doesn't. The pointer is the
+/// object the rules sit on.
+fn rules(
+    old: &Map<String, Value>,
+    new: &Map<String, Value>,
+    pointer: &str,
+    breaks: &mut Vec<Break>,
+) {
+    let texts = |node: &Map<String, Value>| -> Vec<String> {
+        node.get("allOf")
+            .and_then(Value::as_array)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|entry| entry.get("x-rule")?.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let old_texts = texts(old);
+    let mut seen = BTreeSet::new();
+    for text in texts(new) {
+        if !old_texts.contains(&text) && seen.insert(text.clone()) {
+            breaks.push(brk(pointer, &format!("rule added: {text}")));
+        }
+    }
+}
+
 fn child(pointer: &str, key: &str) -> String {
     format!("{pointer}/{}", key.replace('~', "~0").replace('/', "~1"))
 }
@@ -353,6 +383,92 @@ mod tests {
                 "enum lost \"closed\"",
             ]
         );
+    }
+
+    fn rule(text: &str) -> Value {
+        json!({"x-rule": text})
+    }
+
+    fn with_rules(root: &[&str], status: &[&str]) -> Value {
+        with(|s| {
+            s["allOf"] = Value::Array(root.iter().map(|text| rule(text)).collect());
+            s["properties"]["status"]["allOf"] =
+                Value::Array(status.iter().map(|text| rule(text)).collect());
+        })
+    }
+
+    fn pairs(old: &Value, new: &Value) -> Vec<(String, String)> {
+        check(old, new)
+            .into_iter()
+            .map(|b| (b.pointer, b.message))
+            .collect()
+    }
+
+    #[test]
+    fn added_rule_is_breaking() {
+        let old = with_rules(&["any_of(note, status)"], &[]);
+        let new = with_rules(
+            &["any_of(note, status)", "before(loss, loss)"],
+            &["unique(a, b)"],
+        );
+        assert_eq!(
+            pairs(&old, &new),
+            vec![
+                ("".to_owned(), "rule added: before(loss, loss)".to_owned()),
+                (
+                    "/properties/status".to_owned(),
+                    "rule added: unique(a, b)".to_owned()
+                ),
+            ]
+        );
+        let items = |rules: Value| {
+            with(|s| {
+                s["properties"]["x"] = json!({"type": "array",
+                    "items": {"type": "object", "properties": {"a": {"type": "integer"}}, "allOf": rules}});
+            })
+        };
+        assert_eq!(
+            pairs(&items(json!([])), &items(json!([rule("before(a, a)")]))),
+            vec![(
+                "/properties/x/items".to_owned(),
+                "rule added: before(a, a)".to_owned()
+            )]
+        );
+        assert_eq!(
+            pairs(&base(), &with_rules(&["one_of(note, level)"], &[])),
+            vec![("".to_owned(), "rule added: one_of(note, level)".to_owned())]
+        );
+    }
+
+    /// A rule whose text changes is one removed and another added.
+    #[test]
+    fn changed_rule_text_is_an_added_rule() {
+        let old = with_rules(&["one_of(note, level)"], &[]);
+        let new = with_rules(&["one_of(level, note)"], &[]);
+        assert_eq!(
+            pairs(&old, &new),
+            vec![("".to_owned(), "rule added: one_of(level, note)".to_owned())]
+        );
+    }
+
+    #[test]
+    fn removed_rule_is_compatible() {
+        let old = with_rules(
+            &["any_of(note, status)", "before(loss, loss)"],
+            &["unique(a, b)"],
+        );
+        assert_eq!(
+            pairs(&old, &with_rules(&["before(loss, loss)"], &[])),
+            vec![]
+        );
+        assert_eq!(pairs(&old, &base()), vec![]);
+    }
+
+    #[test]
+    fn same_rules_reordered_is_compatible() {
+        let old = with_rules(&["any_of(note, status)", "before(loss, loss)"], &[]);
+        let new = with_rules(&["before(loss, loss)", "any_of(note, status)"], &[]);
+        assert_eq!(pairs(&old, &new), vec![]);
     }
 
     #[test]

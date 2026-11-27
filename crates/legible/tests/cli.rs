@@ -75,6 +75,54 @@ fn zip_entry(zip: &Path, name: &str) -> Vec<u8> {
 }
 
 #[test]
+fn validate_names_a_broken_rule_by_its_message() {
+    let dir = Temp::new("validate-rule");
+    let schema = dir.path("window.json");
+    std::fs::write(
+        &schema,
+        serde_json::json!({
+            "$id": "https://example.org/schemas/org.example.window/v1.json",
+            "type": "object",
+            "properties": {
+                "$type": {"const": "org.example.window"},
+                "version": {"const": 1},
+                "opened_on": {"$ref": format!("{}#/$defs/date", legible_records::COMMON_V1_ID)},
+                "closed_on": {"$ref": format!("{}#/$defs/date", legible_records::COMMON_V1_ID)}
+            },
+            "required": ["$type", "version"],
+            "allOf": [{"x-rule": "before(opened_on, closed_on)"}]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let good = dir.path("good.json");
+    std::fs::write(
+        &good,
+        r#"{"$type": "org.example.window", "version": 1, "opened_on": "2026-01-01", "closed_on": "2026-01-02"}"#,
+    )
+    .unwrap();
+    let bad = dir.path("bad.json");
+    std::fs::write(
+        &bad,
+        r#"{"$type": "org.example.window", "version": 1, "opened_on": "2026-02-01", "closed_on": "2026-01-31"}"#,
+    )
+    .unwrap();
+
+    let result = legible(&[arg("validate"), arg("--schema"), &schema, &good]);
+    assert!(result.status.success(), "{result:?}");
+
+    let result = legible(&[arg("validate"), arg("--schema"), &schema, &good, &bad]);
+    assert_eq!(result.status.code(), Some(1), "{result:?}");
+    assert_eq!(
+        text(&result.stdout),
+        format!(
+            "{}: /: opened_on 2026-02-01 isn't before closed_on 2026-01-31\n",
+            bad.display()
+        )
+    );
+}
+
+#[test]
 fn bundle_and_identity_cannot_both_be_stdin() {
     for sub in ["verify", "unpack"] {
         let mut args = vec![arg("bundle"), arg(sub), arg("-"), arg("-i"), arg("-")];
@@ -2405,4 +2453,54 @@ fn record_hash_refuses_duplicate_keys() {
     let out = legible(&[arg("record"), arg("hash"), &file]);
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("twice"));
+}
+
+/// A published type with rules, in the short form. `extra` is appended to
+/// its document `rules`.
+fn thing_with_rules(extra: &str) -> String {
+    format!(
+        "type: org.example.thing\nversion: 1\nfields:\n  at?: datetime\n  on?: date\n  notes?: string[]\n  owner?: string\n  status: known(open, closed)\n  steps?:\n    items:\n      fields:\n        n: integer\n        m?: integer\n      rules:\n        - before(n, m)\nrules:\n  - one_of(at, on)\n  - requires(status = closed, any_of(notes, owner))\n{extra}"
+    )
+}
+
+#[test]
+fn lint_passes_a_type_with_rules() {
+    let dir = Temp::new("lint-rules");
+    let file = dir.path("thing.yaml");
+    std::fs::write(&file, thing_with_rules("  - at_most_one(notes, owner)\n")).unwrap();
+    let out = legible(&[
+        arg("lint"),
+        &file,
+        arg("--base"),
+        arg("https://example.org/schemas/"),
+    ]);
+    assert_eq!(
+        (out.status.code(), text(&out.stdout), text(&out.stderr)),
+        (Some(0), String::new(), String::new())
+    );
+}
+
+#[test]
+fn check_compat_reports_an_added_rule() {
+    let dir = Temp::new("compat-rules");
+    let old = dir.path("old.yaml");
+    let new = dir.path("new.yaml");
+    std::fs::write(&old, thing_with_rules("")).unwrap();
+    std::fs::write(&new, thing_with_rules("  - at_most_one(notes,   owner)\n")).unwrap();
+    let base = ["--base", "https://example.org/schemas/"].map(arg);
+    let out = legible(&[&[arg("check-compat"), &old, &new], &base[..]].concat());
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert_eq!(
+        text(&out.stdout),
+        format!(
+            "{}: /: rule added: at_most_one(notes, owner)\n",
+            old.display()
+        )
+    );
+    // The other way, the rule is removed, which is compatible.
+    let out = legible(&[&[arg("check-compat"), &new, &old], &base[..]].concat());
+    assert_eq!(
+        (out.status.code(), text(&out.stdout)),
+        (Some(0), String::new())
+    );
 }
