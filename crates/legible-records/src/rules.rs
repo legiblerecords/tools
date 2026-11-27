@@ -986,6 +986,23 @@ mod tests {
         );
     }
 
+    /// A `"` in the middle of a value opens a quoted run for both the
+    /// parser and the text: the spaces inside it are kept by both, and the
+    /// value, which doesn't start with `"`, is read as written.
+    #[test]
+    fn rule_text_and_parse_agree_on_a_quote_inside_a_value() {
+        let source = r#"requires(a = x"  y",  b)"#;
+        let text = rule_text(source);
+        assert_eq!(text, r#"requires(a = x"  y", b)"#);
+        let expected = Ok(Rule::Requires(
+            Condition::Equals("a".to_owned(), Value::from(r#"x"  y""#)),
+            Condition::Given("b".to_owned()),
+        ));
+        assert_eq!(parse(source), expected);
+        assert_eq!(parse(&text), expected);
+        assert_eq!(rule_text(&text), text);
+    }
+
     #[test]
     fn parse_errors() {
         let cases = [
