@@ -7,7 +7,7 @@
 
 use serde_json::{Map, Value};
 
-use super::{Expander, Generator, Loc};
+use super::{Expander, Generator, Loc, Options};
 use crate::rules::{parse, rule_text, Condition, Kind, Rule};
 
 /// How many local `$ref`s a path follows in a row before giving up.
@@ -69,6 +69,64 @@ pub fn rule_kind(property: &Value) -> Option<Kind> {
     } else {
         None
     }
+}
+
+/// The rule member that an `allOf` entry with `x-rule` `text` must be, on
+/// an object with these expanded `properties`, in a schema with these
+/// `$defs`: the whole member, `x-rule` included. Or the problem with the
+/// rule, when `text` isn't a rule's text, doesn't parse, or fails its
+/// checks (§ Problems with rules), as the message without
+/// `` in `<rule>` ``. `rule written twice` is the caller's, since it needs
+/// the other entries.
+///
+/// Generation and lint both accept an entry as a rule member exactly when
+/// this gives it back.
+pub(crate) fn rule_entry(
+    text: &str,
+    properties: &Map<String, Value>,
+    defs: &Map<String, Value>,
+) -> Result<Value, String> {
+    // In a kind message, a ref is written by its definition's name, for the
+    // schema's own definitions and org.legiblerecords.common's alike: the
+    // schema's own name isn't known here.
+    let options = Options {
+        common: crate::COMMON_V1_ID.to_owned(),
+        ..Options::default()
+    };
+    let generator = Generator {
+        own: "common",
+        options: &options,
+        published: false,
+        defs,
+    };
+    entry(text, properties, defs, |p| generator.describe(p))
+}
+
+/// [`rule_entry`], with the types in kind messages written by `describe`.
+fn entry(
+    text: &str,
+    properties: &Map<String, Value>,
+    defs: &Map<String, Value>,
+    describe: impl Fn(&Value) -> String,
+) -> Result<Value, String> {
+    let canonical = rule_text(text);
+    if canonical != text {
+        return Err(format!("its text is {canonical}"));
+    }
+    let rule = parse(text)?;
+    checked_member(text, &rule, properties, defs, describe)
+}
+
+/// Checks a parsed rule and gives its whole member, `x-rule` set to `text`.
+fn checked_member(
+    text: &str,
+    rule: &Rule,
+    properties: &Map<String, Value>,
+    defs: &Map<String, Value>,
+    describe: impl Fn(&Value) -> String,
+) -> Result<Value, String> {
+    check(rule, properties, defs, describe)?;
+    Ok(member(text, rule, properties))
 }
 
 /// The whole rule member: [`rule_member`] with `x-rule` set to `text`.
@@ -371,15 +429,18 @@ impl Expander<'_> {
                 continue;
             };
             let text = rule_text(source);
+            // The rule as written is parsed, not its text, so a value in
+            // double quotes keeps its spaces.
             let checked = parse(source).and_then(|rule| {
-                check(&rule, &properties, &self.defs, |p| self.describe(p))?;
+                let member =
+                    checked_member(&text, &rule, &properties, &self.defs, |p| self.describe(p))?;
                 if texts.contains(&text) {
                     return Err("rule written twice".to_owned());
                 }
-                Ok(rule)
+                Ok(member)
             });
             match checked {
-                Ok(rule) => members.push(member(&text, &rule, &properties)),
+                Ok(member) => members.push(member),
                 Err(message) => self.problem(&rule_loc, format!("{message} in `{source}`")),
             }
             texts.push(text);
@@ -416,12 +477,11 @@ impl Generator<'_> {
         let mut texts: Vec<&str> = Vec::new();
         for entry in entries {
             let text = entry.get("x-rule")?.as_str()?;
-            if rule_text(text) != text || texts.contains(&text) {
+            if texts.contains(&text) {
                 return None;
             }
-            let rule = parse(text).ok()?;
-            check(&rule, properties, self.defs, |p| self.describe(p)).ok()?;
-            if member(text, &rule, properties) != *entry {
+            let member = self::entry(text, properties, self.defs, |p| self.describe(p)).ok()?;
+            if member != *entry {
                 return None;
             }
             texts.push(text);

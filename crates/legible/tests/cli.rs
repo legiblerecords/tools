@@ -2406,3 +2406,53 @@ fn record_hash_refuses_duplicate_keys() {
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("twice"));
 }
+
+/// A published type with rules, in the short form. `extra` is appended to
+/// its document `rules`.
+fn thing_with_rules(extra: &str) -> String {
+    format!(
+        "type: org.example.thing\nversion: 1\nfields:\n  at?: datetime\n  on?: date\n  notes?: string[]\n  owner?: string\n  status: known(open, closed)\n  steps?:\n    items:\n      fields:\n        n: integer\n        m?: integer\n      rules:\n        - before(n, m)\nrules:\n  - one_of(at, on)\n  - requires(status = closed, any_of(notes, owner))\n{extra}"
+    )
+}
+
+#[test]
+fn lint_passes_a_type_with_rules() {
+    let dir = Temp::new("lint-rules");
+    let file = dir.path("thing.yaml");
+    std::fs::write(&file, thing_with_rules("  - at_most_one(notes, owner)\n")).unwrap();
+    let out = legible(&[
+        arg("lint"),
+        &file,
+        arg("--base"),
+        arg("https://example.org/schemas/"),
+    ]);
+    assert_eq!(
+        (out.status.code(), text(&out.stdout), text(&out.stderr)),
+        (Some(0), String::new(), String::new())
+    );
+}
+
+#[test]
+fn check_compat_reports_an_added_rule() {
+    let dir = Temp::new("compat-rules");
+    let old = dir.path("old.yaml");
+    let new = dir.path("new.yaml");
+    std::fs::write(&old, thing_with_rules("")).unwrap();
+    std::fs::write(&new, thing_with_rules("  - at_most_one(notes,   owner)\n")).unwrap();
+    let base = ["--base", "https://example.org/schemas/"].map(arg);
+    let out = legible(&[&[arg("check-compat"), &old, &new], &base[..]].concat());
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert_eq!(
+        text(&out.stdout),
+        format!(
+            "{}: /: rule added: at_most_one(notes, owner)\n",
+            old.display()
+        )
+    );
+    // The other way, the rule is removed, which is compatible.
+    let out = legible(&[&[arg("check-compat"), &new, &old], &base[..]].concat());
+    assert_eq!(
+        (out.status.code(), text(&out.stdout)),
+        (Some(0), String::new())
+    );
+}

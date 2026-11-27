@@ -12,6 +12,7 @@ use crate::yaml::{emit_string, is_json_number, parse_restricted_with_lines};
 
 mod rules;
 
+pub(crate) use rules::rule_entry;
 pub use rules::{rule_kind, rule_member};
 
 pub const DRAFT: &str = "https://json-schema.org/draft/2020-12/schema";
