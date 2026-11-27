@@ -929,7 +929,11 @@ fn split_list(inner: &str) -> Vec<String> {
     out
 }
 
-fn enum_value(value: &str) -> Result<Value, String> {
+/// Reads one value as `enum`'s values are read (§ Type expressions): a
+/// JSON string in double quotes, a JSON number, or the text as written.
+/// Values in single quotes, and `null`, are refused. Rules read their
+/// values with this too.
+pub(crate) fn enum_value(value: &str) -> Result<Value, String> {
     if value.starts_with('"') {
         return serde_json::from_str::<String>(value)
             .map(Value::String)

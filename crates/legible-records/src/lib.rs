@@ -7,6 +7,8 @@
 //! - [`record`]: a record's content line and content hash;
 //! - [`record_set`]: record sets, many records of one type in one NDJSON
 //!   file, written, checked and read as a stream;
+//! - [`rules`]: rules between a record's fields, parsed from their text,
+//!   with the messages they fail with and the own shapes evaluated;
 //! - [`code`]: the outcome codes readers return;
 //! - [`feed`]: feed indexes, connection files, reader state and reading a
 //!   feed;
@@ -34,6 +36,7 @@ pub mod lint;
 pub mod net;
 pub mod record;
 pub mod record_set;
+pub mod rules;
 pub mod short_form;
 pub mod sign;
 pub mod time;
