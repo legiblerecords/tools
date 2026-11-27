@@ -1344,6 +1344,142 @@
    "short": "fields:\n  groups:\n    items:\n      fields:\n        id: slug\n        parent?: slug\nrules:\n  - within(groups[].parent, groups[].id)\n"
   },
   {
+   "name": "unique-compares-values",
+   "records": [
+    {
+     "failures": [],
+     "record": {
+      "xs": [
+       {
+        "v": 1
+       },
+       {
+        "v": 2
+       }
+      ]
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "more than one item in xs has v 1",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "xs": [
+       {
+        "v": 1
+       },
+       {
+        "v": 1.0
+       }
+      ]
+     }
+    },
+    {
+     "failures": [],
+     "record": {
+      "ys": [
+       {
+        "w": {
+         "a": 1,
+         "b": 2
+        }
+       },
+       {
+        "w": {
+         "a": 1,
+         "b": 3
+        }
+       }
+      ]
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "more than one item in ys has w {\"a\":1,\"b\":2}",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "ys": [
+       {
+        "w": {
+         "a": 1,
+         "b": 2
+        }
+       },
+       {
+        "w": {
+         "b": 2,
+         "a": 1
+        }
+       }
+      ]
+     }
+    },
+    {
+     "failures": [],
+     "record": {
+      "ys": [
+       {
+        "w": [
+         1,
+         2
+        ]
+       },
+       {
+        "w": [
+         2,
+         1
+        ]
+       }
+      ]
+     }
+    }
+   ],
+   "short": "fields:\n  xs?:\n    items:\n      fields:\n        v: number\n  ys?:\n    items:\n      fields:\n        w: object | integer[]\nrules:\n  - unique(xs, v)\n  - unique(ys, w)\n"
+  },
+  {
+   "name": "within-compares-values",
+   "records": [
+    {
+     "failures": [],
+     "record": {
+      "ids": [
+       1.0,
+       2
+      ],
+      "refs": [
+       1,
+       2.0
+      ]
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "3 at refs[] isn't among ids[]",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "ids": [
+       1,
+       2
+      ],
+      "refs": [
+       1,
+       3
+      ]
+     }
+    }
+   ],
+   "short": "fields:\n  ids?: number[]\n  refs?: number[]\nrules:\n  - within(refs[], ids[])\n"
+  },
+  {
    "name": "rules-on-items",
    "options": {
     "common": "https://legiblerecords.org/schemas/org.legiblerecords.common/v1.json"
