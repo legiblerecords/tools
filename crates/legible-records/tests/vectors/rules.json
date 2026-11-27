@@ -438,6 +438,12 @@
     {
      "failures": [],
      "record": {
+      "kind": "shared"
+     }
+    },
+    {
+     "failures": [],
+     "record": {
       "kind": "person",
       "person_email": "someone@example.com"
      }
@@ -1021,6 +1027,50 @@
    "short": "fields:\n  experts:\n    items:\n      fields:\n        id?: slug\n        name: string\nrules:\n  - unique(experts, id)\n"
   },
   {
+   "name": "unique-list-absent",
+   "records": [
+    {
+     "failures": [],
+     "record": {}
+    },
+    {
+     "failures": [],
+     "record": {
+      "boxes": [
+       {
+        "box": "app"
+       },
+       {
+        "box": "db"
+       }
+      ]
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "more than one item in boxes has box db",
+       "pointer": ""
+      }
+     ],
+     "record": {
+      "boxes": [
+       {
+        "box": "db"
+       },
+       {
+        "box": "app"
+       },
+       {
+        "box": "db"
+       }
+      ]
+     }
+    }
+   ],
+   "short": "fields:\n  boxes?:\n    items:\n      fields:\n        box: string\nrules:\n  - unique(boxes, box)\n"
+  },
+  {
    "name": "within",
    "options": {
     "common": "https://legiblerecords.org/schemas/org.legiblerecords.common/v1.json"
@@ -1326,6 +1376,74 @@
    "short": "fields:\n  seen_in?:\n    fields:\n      digest?: string\n      tag?: string\n      commit?: string\n    rules:\n      - any_of(digest, tag, commit)\n"
   },
   {
+   "name": "rules-on-defs",
+   "records": [
+    {
+     "failures": [],
+     "record": {}
+    },
+    {
+     "failures": [],
+     "record": {
+      "holders": [
+       {
+        "identifiers": [
+         "id-1"
+        ]
+       }
+      ],
+      "owner": {
+       "emails": [
+        "someone@example.com"
+       ]
+      }
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "needs emails or identifiers",
+       "pointer": "/holders/1"
+      }
+     ],
+     "record": {
+      "holders": [
+       {
+        "emails": [
+         "someone@example.com"
+        ]
+       },
+       {}
+      ]
+     }
+    },
+    {
+     "failures": [
+      {
+       "message": "needs emails or identifiers",
+       "pointer": "/holders/0"
+      },
+      {
+       "message": "needs emails or identifiers",
+       "pointer": "/owner"
+      }
+     ],
+     "record": {
+      "holders": [
+       {
+        "emails": [],
+        "name": "Bob"
+       }
+      ],
+      "owner": {
+       "name": "Ann"
+      }
+     }
+    }
+   ],
+   "short": "fields:\n  owner?: t.match\n  holders?: t.match[]\ndefs:\n  match:\n    fields:\n      name?: string\n      emails?: string[]\n      identifiers?: string[]\n    rules:\n      - any_of(emails, identifiers)\n"
+  },
+  {
    "name": "failure-order",
    "options": {
     "common": "https://legiblerecords.org/schemas/org.legiblerecords.common/v1.json"
@@ -1400,11 +1518,11 @@
     {
      "failures": [],
      "record": {
-      "alpha": {
-       "x": "1"
-      },
       "Beta": {
        "y": "2"
+      },
+      "alpha": {
+       "x": "1"
       }
      }
     },
@@ -1420,11 +1538,11 @@
       }
      ],
      "record": {
-      "alpha": {},
       "Beta": {
        "x": "1",
        "y": "2"
-      }
+      },
+      "alpha": {}
      }
     }
    ],
