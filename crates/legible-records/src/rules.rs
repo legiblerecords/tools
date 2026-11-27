@@ -9,6 +9,8 @@
 //! [`evaluate`] checks an own shape against the object it sits on.
 
 use std::cmp::Ordering;
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 
 use ::time::{Date, Month};
 use serde_json::{Number, Value};
@@ -298,12 +300,40 @@ fn listed(items: &[String], two: &str) -> String {
     }
 }
 
-/// A value as a message shows it: a string as it is, anything else as JSON.
+/// A value as a message shows it: a string as written, anything else as
+/// JSON. So that a record's value can't add a line to the output or send a
+/// terminal escape, a string's `\`, C0 controls, DEL and C1 controls are
+/// escaped as JSON escapes them (`\\`, `\n`, `\u001b`); in JSON, which
+/// escapes the rest already, DEL and C1 controls are.
 fn shown(value: &Value) -> String {
     match value {
-        Value::String(s) => s.clone(),
-        other => other.to_string(),
+        Value::String(s) => escaped(s, true),
+        other => escaped(&other.to_string(), false),
     }
+}
+
+/// `text` with its controls escaped: DEL (U+007F) and C1 controls
+/// (U+0080 to U+009F) always, and with `all`, `\` and C0 controls
+/// (U+0000 to U+001F) too. `\b`, `\t`, `\n`, `\f` and `\r` are written
+/// short, and the rest as `\u` and four lowercase hex digits, as JSON
+/// writes them.
+fn escaped(text: &str, all: bool) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\u{7f}'..='\u{9f}' => out.push_str(&format!("\\u{:04x}", u32::from(ch))),
+            _ if !all => out.push(ch),
+            '\\' => out.push_str("\\\\"),
+            '\u{8}' => out.push_str("\\b"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\u{c}' => out.push_str("\\f"),
+            '\r' => out.push_str("\\r"),
+            '\0'..='\u{1f}' => out.push_str(&format!("\\u{:04x}", u32::from(ch))),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 /// Checks an own shape against `object`, the object the rule sits on, and
@@ -368,11 +398,17 @@ pub fn evaluate(rule: &Rule, object: &Value, kind: impl Fn(&str) -> Option<Kind>
             let Some(items) = object.get(list).and_then(Value::as_array) else {
                 return Vec::new();
             };
+            // Each value once, in the order it first appears, with how many
+            // items have it; `index` finds a value's place by its canonical form.
             let mut seen: Vec<(&Value, usize)> = Vec::new();
+            let mut index: HashMap<Canonical, usize> = HashMap::new();
             for value in items.iter().filter_map(|item| at_key(item, key)) {
-                match seen.iter_mut().find(|(v, _)| same(v, value)) {
-                    Some((_, count)) => *count += 1,
-                    None => seen.push((value, 1)),
+                match index.entry(Canonical::of(value)) {
+                    Entry::Occupied(at) => seen[*at.get()].1 += 1,
+                    Entry::Vacant(at) => {
+                        at.insert(seen.len());
+                        seen.push((value, 1));
+                    }
                 }
             }
             seen.into_iter()
@@ -383,12 +419,15 @@ pub fn evaluate(rule: &Rule, object: &Value, kind: impl Fn(&str) -> Option<Kind>
                 .collect()
         }
         Rule::Within(path, among) => {
-            let allowed = at_path(object, among);
+            let allowed: HashSet<Canonical> = at_path(object, among)
+                .into_iter()
+                .map(Canonical::of)
+                .collect();
             let mut missing: Vec<&Value> = Vec::new();
+            let mut reported: HashSet<Canonical> = HashSet::new();
             for value in at_path(object, path) {
-                if !allowed.iter().any(|a| same(a, value))
-                    && !missing.iter().any(|m| same(m, value))
-                {
+                let canonical = Canonical::of(value);
+                if !allowed.contains(&canonical) && reported.insert(canonical) {
                     missing.push(value);
                 }
             }
@@ -430,18 +469,56 @@ fn at_path<'a>(object: &'a Value, path: &str) -> Vec<&'a Value> {
     values
 }
 
-/// Whether two values are the same, with numbers compared as numbers
-/// (`1` and `1.0` are the same), as JSON Schema's `uniqueItems` compares.
-fn same(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::Number(x), Value::Number(y)) => compare_numbers(x, y) == Some(Ordering::Equal),
-        (Value::Array(x), Value::Array(y)) => {
-            x.len() == y.len() && x.iter().zip(y).all(|(x, y)| same(x, y))
+/// A value in a form where two values are equal when they are the same,
+/// with numbers compared as numbers (`1` and `1.0` are the same), as JSON
+/// Schema's `uniqueItems` compares; `unique` and `within` key a set on it.
+/// An integral number below 2^126 in size is an integer, whether written as
+/// one or not; any other number is its `f64`. So integers are compared
+/// exactly, and a fraction or a very large number as floating point.
+#[derive(PartialEq, Eq, Hash)]
+enum Canonical<'a> {
+    Null,
+    Bool(bool),
+    Integer(i128),
+    Float(u64),
+    String(&'a str),
+    Array(Vec<Canonical<'a>>),
+    /// Members sorted by name.
+    Object(Vec<(&'a str, Canonical<'a>)>),
+}
+
+impl<'a> Canonical<'a> {
+    fn of(value: &'a Value) -> Self {
+        match value {
+            Value::Null => Canonical::Null,
+            Value::Bool(b) => Canonical::Bool(*b),
+            Value::Number(n) => Canonical::number(n),
+            Value::String(s) => Canonical::String(s),
+            Value::Array(items) => Canonical::Array(items.iter().map(Canonical::of).collect()),
+            Value::Object(members) => {
+                let mut members: Vec<_> = members
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), Canonical::of(value)))
+                    .collect();
+                members.sort_by(|a, b| a.0.cmp(b.0));
+                Canonical::Object(members)
+            }
         }
-        (Value::Object(x), Value::Object(y)) => {
-            x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_some_and(|w| same(v, w)))
+    }
+
+    fn number(n: &Number) -> Self {
+        if let Some(i) = n.as_i64() {
+            return Canonical::Integer(i128::from(i));
         }
-        _ => a == b,
+        if let Some(u) = n.as_u64() {
+            return Canonical::Integer(i128::from(u));
+        }
+        let f = n.as_f64().unwrap_or(f64::NAN);
+        if f.fract() == 0.0 && f.abs() < 2f64.powi(126) {
+            // Integral and in range, so the cast is exact; -0.0 becomes 0.
+            return Canonical::Integer(f as i128);
+        }
+        Canonical::Float(f.to_bits())
     }
 }
 
@@ -1568,6 +1645,98 @@ mod tests {
             ok
         );
         assert_eq!(check(rule, json!({"groups": "top"})), ok);
+    }
+
+    #[test]
+    fn unique_and_within_compare_values_as_values() {
+        // Numbers as numbers, members in any order, lists item by item.
+        assert_eq!(
+            check(
+                "unique(xs, v)",
+                json!({"xs": [
+                    {"v": 1}, {"v": 1.0}, {"v": -0.0}, {"v": 0}, {"v": 1.5}, {"v": "1"},
+                    {"v": {"a": 1, "b": [2]}}, {"v": {"b": [2.0], "a": 1}},
+                    {"v": null}, {"v": false}, {"v": [1, 2]}, {"v": [2, 1]}
+                ]})
+            ),
+            [
+                "more than one item in xs has v 1",
+                "more than one item in xs has v -0.0",
+                r#"more than one item in xs has v {"a":1,"b":[2]}"#
+            ]
+        );
+        assert_eq!(
+            check(
+                "within(xs[].v, ys[].v)",
+                json!({"xs": [{"v": 2.0}, {"v": 3}, {"v": 3.0}, {"v": "2"}], "ys": [{"v": 2}]})
+            ),
+            [
+                "3 at xs[].v isn't among ys[].v",
+                "2 at xs[].v isn't among ys[].v"
+            ]
+        );
+    }
+
+    #[test]
+    fn unique_and_within_are_fast_on_long_lists() {
+        // Each value is found by its canonical form, not by a search, so
+        // 100,000 items take a moment rather than minutes.
+        let n = 100_000;
+        let items: Vec<Value> = (0..n)
+            .map(|i| json!({"id": format!("id-{i}"), "n": i, "x": f64::from(i) + 0.5}))
+            .collect();
+        let mut record = json!({"items": items.clone(), "others": items});
+        record["items"][99_999]["id"] = json!("id-0");
+        let limit = std::time::Duration::from_secs(if cfg!(debug_assertions) { 10 } else { 1 });
+        let cases = [
+            (
+                "unique(items, id)",
+                vec!["more than one item in items has id id-0".to_owned()],
+            ),
+            ("unique(items, n)", vec![]),
+            ("unique(items, x)", vec![]),
+            ("within(items[].n, others[].n)", vec![]),
+            (
+                "within(others[].id, items[].id)",
+                vec!["id-99999 at others[].id isn't among items[].id".to_owned()],
+            ),
+        ];
+        for (text, expected) in cases {
+            let rule = parse(text).unwrap();
+            let start = std::time::Instant::now();
+            let failures = evaluate(&rule, &record, kinds);
+            let took = start.elapsed();
+            assert_eq!(failures, expected, "{text}");
+            assert!(took < limit, "{text} took {took:?}");
+        }
+    }
+
+    #[test]
+    fn messages_escape_controls_in_values() {
+        assert_eq!(
+            check(
+                "unique(xs, v)",
+                json!({"xs": [{"v": "a\nb\u{1b}[31m\u{7f}\u{85}\\"}, {"v": "a\nb\u{1b}[31m\u{7f}\u{85}\\"}]})
+            ),
+            [r"more than one item in xs has v a\nb\u001b[31m\u007f\u0085\\"]
+        );
+        assert_eq!(
+            check(
+                "within(xs[].v, ys[].v)",
+                json!({"xs": [{"v": "\t\r\u{8}\u{c}\u{0}\u{1f} é ✓"}, {"v": {"k": "\n\u{9b}"}}]})
+            ),
+            [
+                r"\t\r\b\f\u0000\u001f é ✓ at xs[].v isn't among ys[].v",
+                r#"{"k":"\n\u009b"} at xs[].v isn't among ys[].v"#
+            ]
+        );
+        assert_eq!(
+            check(
+                "before(on, expires)",
+                json!({"on": "2026-01-01\nok", "expires": "2026-02-01"})
+            ),
+            [r"on 2026-01-01\nok isn't before expires 2026-02-01"]
+        );
     }
 
     #[test]
