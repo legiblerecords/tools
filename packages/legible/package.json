@@ -1,6 +1,6 @@
 {
   "name": "@legiblerecords/legible",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Legible Records in JavaScript: expand and generate short-form schemas, lint published types, check compatibility, and pack, verify and encrypt bundles. Built from the Rust tools as WebAssembly.",
   "license": "Apache-2.0",
   "repository": {
