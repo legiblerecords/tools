@@ -69,6 +69,27 @@ test("expand, lint and validate", () => {
   assert.match(bad.stdout, /title/);
 });
 
+test("validate reads .ndjson one record per line", () => {
+  const dir = workspace();
+  const good = JSON.stringify({ $type: "tech.example.controls.control", version: 1, id: "mfa", title: "MFA" });
+  // Blank lines, CRLF endings and no final newline are all fine.
+  writeFileSync(join(dir, "clean.ndjson"), `${good}\r\n\n${good}`);
+  const clean = run(dir, ["validate", "-s", "control.yaml", ...BASE, "clean.ndjson"]);
+  assert.equal(clean.status, 0, clean.stdout + clean.stderr);
+
+  // Each line is checked on its own, and every problem names its line.
+  const missingTitle = JSON.stringify({ $type: "tech.example.controls.control", version: 1, id: "sso" });
+  const other = JSON.stringify({ $type: "tech.example.other", version: 2 });
+  writeFileSync(join(dir, "mixed.NDJSON"), `${good}\n${missingTitle}\n\n${other}\nnot json\n${good}\n`);
+  const mixed = run(dir, ["validate", "-s", "control.yaml", ...BASE, "mixed.NDJSON"]);
+  assert.equal(mixed.status, 1, mixed.stdout + mixed.stderr);
+  const lines = mixed.stdout.trimEnd().split("\n");
+  assert.equal(lines.length, 3, mixed.stdout);
+  assert.match(lines[0], /^mixed\.NDJSON: line 2: \/: .*title/);
+  assert.match(lines[1], /^mixed\.NDJSON: line 4: no schema given for "tech\.example\.other" version 2/);
+  assert.match(lines[2], /^mixed\.NDJSON: line 5: not JSON: /);
+});
+
 test("pack, verify and unpack a plain bundle", () => {
   const dir = workspace();
   const packed = run(dir, ["bundle", "pack", "in", "-o", "b.zip", "-s", "control.yaml", ...BASE]);

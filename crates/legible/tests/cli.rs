@@ -123,6 +123,66 @@ fn validate_names_a_broken_rule_by_its_message() {
 }
 
 #[test]
+fn validate_reads_ndjson_one_record_per_line() {
+    let dir = Temp::new("validate-ndjson");
+    let schema = dir.path("window.json");
+    std::fs::write(
+        &schema,
+        serde_json::json!({
+            "$id": "https://example.org/schemas/org.example.window/v1.json",
+            "type": "object",
+            "properties": {
+                "$type": {"const": "org.example.window"},
+                "version": {"const": 1},
+                "opened_on": {"$ref": format!("{}#/$defs/date", legible_records::COMMON_V1_ID)}
+            },
+            "required": ["$type", "version", "opened_on"]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let good = r#"{"$type": "org.example.window", "version": 1, "opened_on": "2026-01-01"}"#;
+
+    // Blank lines, CRLF endings and no final newline are all fine.
+    let clean = dir.path("clean.ndjson");
+    std::fs::write(&clean, format!("{good}\r\n\n{good}")).unwrap();
+    let result = legible(&[arg("validate"), arg("-s"), &schema, &clean]);
+    assert!(result.status.success(), "{result:?}");
+
+    // Each line is checked on its own, and every problem names its line.
+    let mixed = dir.path("mixed.NDJSON");
+    std::fs::write(
+        &mixed,
+        format!(
+            "{good}\n{}\n\n{}\nnot json\n{good}\n",
+            r#"{"$type": "org.example.window", "version": 1}"#,
+            r#"{"$type": "org.example.other", "version": 2}"#,
+        ),
+    )
+    .unwrap();
+    let result = legible(&[arg("validate"), arg("-s"), &schema, &mixed]);
+    assert_eq!(result.status.code(), Some(1), "{result:?}");
+    let out = text(&result.stdout);
+    let lines: Vec<&str> = out.lines().collect();
+    let name = mixed.display().to_string();
+    assert_eq!(lines.len(), 3, "{out}");
+    assert!(
+        lines[0].starts_with(&format!("{name}: line 2: /: ")) && lines[0].contains("opened_on"),
+        "{out}"
+    );
+    assert!(
+        lines[1].starts_with(&format!(
+            "{name}: line 4: no schema given for \"org.example.other\" version 2"
+        )),
+        "{out}"
+    );
+    assert!(
+        lines[2].starts_with(&format!("{name}: line 5: not JSON: ")),
+        "{out}"
+    );
+}
+
+#[test]
 fn bundle_and_identity_cannot_both_be_stdin() {
     for sub in ["verify", "unpack"] {
         let mut args = vec![arg("bundle"), arg(sub), arg("-"), arg("-i"), arg("-")];
