@@ -48,10 +48,12 @@ fn node(
     lower_bound(old, new, pointer, "exclusiveMinimum", breaks);
     lower_bound(old, new, pointer, "minLength", breaks);
     lower_bound(old, new, pointer, "minItems", breaks);
+    lower_bound(old, new, pointer, "minProperties", breaks);
     upper_bound(old, new, pointer, "maximum", breaks);
     upper_bound(old, new, pointer, "exclusiveMaximum", breaks);
     upper_bound(old, new, pointer, "maxLength", breaks);
     upper_bound(old, new, pointer, "maxItems", breaks);
+    upper_bound(old, new, pointer, "maxProperties", breaks);
     enums(old, new, pointer, breaks);
     required(old, new, pointer, breaks);
     rules(old, new, pointer, breaks);
@@ -383,6 +385,30 @@ mod tests {
                 "enum lost \"closed\"",
             ]
         );
+    }
+
+    #[test]
+    fn property_counts_are_bounds_too() {
+        let old = with(|s| s["properties"]["meta"] = json!({"type": "object", "maxProperties": 5}));
+        let raised = with(|s| {
+            s["properties"]["meta"] =
+                json!({"type": "object", "minProperties": 1, "maxProperties": 3})
+        });
+        assert_eq!(
+            pairs(&old, &raised),
+            vec![
+                (
+                    "/properties/meta/minProperties".to_owned(),
+                    "minProperties was raised".to_owned()
+                ),
+                (
+                    "/properties/meta/maxProperties".to_owned(),
+                    "maxProperties was lowered".to_owned()
+                ),
+            ]
+        );
+        let relaxed = with(|s| s["properties"]["meta"] = json!({"type": "object"}));
+        assert_eq!(pairs(&old, &relaxed), vec![]);
     }
 
     fn rule(text: &str) -> Value {
