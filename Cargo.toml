@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/legible-records", "crates/legible", "crates/legible-records-wasm"]
 
 [workspace.package]
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/legiblerecords/tools"
@@ -23,7 +23,7 @@ ed25519-dalek = { version = "2", default-features = false, features = ["std", "f
 time = { version = "0.3", features = ["parsing", "formatting"] }
 getrandom = "0.2"
 zeroize = "1"
-legible-records = { path = "crates/legible-records", version = "0.2.1", default-features = false }
+legible-records = { path = "crates/legible-records", version = "0.3.0", default-features = false }
 
 # The WebAssembly build for npm: smallest code over fastest, since it is
 # downloaded by browsers. The CLI keeps the normal release profile.
