@@ -7,7 +7,7 @@
 #
 # Needs the wasm32-unknown-unknown Rust target and wasm-bindgen-cli at the
 # same version as the wasm-bindgen crate in Cargo.lock. Runs wasm-opt when
-# it's installed.
+# it's installed: binaryen version_123 (Ubuntu 24.04's 108 is too old).
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
@@ -38,5 +38,12 @@ cp "$work/node/legible_records_wasm.d.ts" "$here/dist/legible_records_wasm.d.cts
 if command -v wasm-opt >/dev/null 2>&1; then
   wasm-opt -Oz --strip-debug --strip-producers --strip-target-features \
     "$here/dist/legible_records_wasm_bg.wasm" -o "$here/dist/legible_records_wasm_bg.wasm"
+fi
+
+# An old wasm-opt can leave a module that won't load (binaryen 108 breaks
+# wasm-bindgen's externref table), so check it loads before calling it built.
+if command -v node >/dev/null 2>&1; then
+  node -e 'require(process.argv[1])' "$here/dist/legible_records_wasm.cjs" ||
+    { echo "the built module doesn't load; if wasm-opt ran, it may be too old (binaryen version_123 works)" >&2; exit 1; }
 fi
 cp "$root/LICENSE" "$here/LICENSE"
