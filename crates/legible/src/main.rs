@@ -366,7 +366,9 @@ fn run(command: Command) -> Result<(), Stop> {
             }
             let mut ok = true;
             for path in &records {
-                // A .ndjson file holds one record per line; blank lines are skipped.
+                // A .ndjson file holds one record per line; blank lines are skipped. A
+                // record that isn't JSON is a problem with the input, reported below;
+                // a file that can't be read stops the tool.
                 let given: Vec<(String, Result<Value, String>)> = if is_ndjson(path) {
                     read(path)?
                         .split('\n')
@@ -378,7 +380,8 @@ fn run(command: Command) -> Result<(), Stop> {
                         })
                         .collect()
                 } else {
-                    vec![(path.display().to_string(), Ok(read_json(path)?))]
+                    let record = serde_json::from_str(&read(path)?).map_err(|e| e.to_string());
+                    vec![(path.display().to_string(), record)]
                 };
                 for (at, record) in given {
                     let record = match record {

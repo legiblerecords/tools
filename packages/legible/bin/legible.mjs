@@ -381,23 +381,21 @@ function schemaFor(schemas, record) {
 
 /**
  * The records a file holds, each with where it is: a .json file holds one, a
- * .ndjson file one per line (blank lines skipped). A line that isn't JSON comes
- * back with its error, so the lines after it are still checked.
+ * .ndjson file one per line (blank lines skipped). A record that isn't JSON
+ * comes back with its error, so the records after it are still checked; a file
+ * that can't be read stops the tool.
  */
 function records(file) {
-  if (!/\.ndjson$/i.test(file)) return [{ at: file, record: readJson(file) }];
-  return readInput(file)
-    .toString("utf8")
-    .split("\n")
-    .flatMap((line, i) => {
-      if (!line.trim()) return [];
-      const at = `${file}: line ${i + 1}`;
-      try {
-        return [{ at, record: JSON.parse(line) }];
-      } catch (e) {
-        return [{ at, error: message(e) }];
-      }
-    });
+  const parse = (at, text) => {
+    try {
+      return { at, record: JSON.parse(text) };
+    } catch (e) {
+      return { at, error: message(e) };
+    }
+  };
+  const text = readInput(file).toString("utf8");
+  if (!/\.ndjson$/i.test(file)) return [parse(file, text)];
+  return text.split("\n").flatMap((line, i) => (line.trim() ? [parse(`${file}: line ${i + 1}`, line)] : []));
 }
 
 async function validate(schemas, files) {
