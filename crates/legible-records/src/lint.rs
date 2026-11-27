@@ -3,7 +3,7 @@
 
 use serde_json::{json, Map, Value};
 
-use crate::short_form::{is_type_identifier, rule_entry};
+use crate::short_form::{is_type_identifier, rule_entry, rule_holder, NoMembers};
 
 /// One place a schema leaves the published subset.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -158,38 +158,40 @@ impl Walk<'_> {
         }
         for keyword in SCHEMA_LISTS {
             let here = child(pointer, keyword);
-            match object.get(keyword) {
-                Some(Value::Array(list)) if keyword == "allOf" && !in_member => {
-                    self.rule_members(object, list, &here, findings);
+            if keyword == "allOf" && !in_member {
+                self.rule_members(object, &here, findings);
+            } else if let Some(Value::Array(list)) = object.get(keyword) {
+                for (index, value) in list.iter().enumerate() {
+                    self.node(value, &format!("{here}/{index}"), in_member, findings);
                 }
-                Some(Value::Array(list)) => {
-                    for (index, value) in list.iter().enumerate() {
-                        self.node(value, &format!("{here}/{index}"), in_member, findings);
-                    }
-                }
-                Some(_) if keyword == "allOf" && !in_member => {
-                    findings.push(finding(&here, NOT_A_RULE_MEMBER));
-                }
-                _ => {}
             }
         }
     }
 
-    /// Checks the entries of `object`'s `allOf`, which must all be rule
-    /// members: each is exactly what [`rule_entry`] gives for its `x-rule`
-    /// on `object`'s `properties`, and no two have the same text.
-    fn rule_members(
-        &self,
-        object: &Map<String, Value>,
-        entries: &[Value],
-        here: &str,
-        findings: &mut Vec<Finding>,
-    ) {
-        let empty = Map::new();
-        let properties = object
-            .get("properties")
-            .and_then(Value::as_object)
-            .unwrap_or(&empty);
+    /// Checks `object`'s `allOf`, which must hold only rule members, on an
+    /// object that can hold them ([`rule_holder`]): each entry is exactly
+    /// what [`rule_entry`] gives for its `x-rule` on `object`'s
+    /// `properties`, and no two have the same text.
+    fn rule_members(&self, object: &Map<String, Value>, here: &str, findings: &mut Vec<Finding>) {
+        let none = Map::new();
+        let (entries, properties, not_an_object) = match rule_holder(object) {
+            Ok((entries, properties)) => (entries, properties, None),
+            Err(NoMembers::Absent) => return,
+            Err(NoMembers::NotAList) => {
+                findings.push(finding(here, NOT_A_RULE_MEMBER));
+                return;
+            }
+            Err(NoMembers::Empty) => {
+                findings.push(finding(here, "allOf is empty"));
+                return;
+            }
+            Err(NoMembers::NotAnObject(problem)) => {
+                let Some(Value::Array(entries)) = object.get("allOf") else {
+                    return;
+                };
+                (&entries[..], &none, Some(problem))
+            }
+        };
         let mut texts: Vec<&str> = Vec::new();
         for (index, entry) in entries.iter().enumerate() {
             let at = format!("{here}/{index}");
@@ -198,7 +200,9 @@ impl Walk<'_> {
                 self.node(entry, &at, false, findings);
                 continue;
             };
-            let problem = if texts.contains(&text) {
+            let problem = if let Some(problem) = not_an_object {
+                Some(format!("rule member {text}: {problem}"))
+            } else if texts.contains(&text) {
                 Some(format!("rule member {text}: rule written twice"))
             } else {
                 match rule_entry(text, properties, self.defs) {
@@ -489,6 +493,53 @@ mod tests {
             schema["allOf"].as_array_mut().unwrap().push(json!({"x-rule": rule}));
             assert_eq!(messages(&schema), pairs(&[("/allOf/6", message)]));
         }
+    }
+
+    /// Rule members need an object that can't be null, as generation does.
+    #[test]
+    fn rule_members_need_an_object_that_cannot_be_null() {
+        let dates = json!({
+            "a": {"$ref": "https://legiblerecords.org/schemas/org.legiblerecords.common/v1.json#/$defs/date"},
+            "b": {"$ref": "https://legiblerecords.org/schemas/org.legiblerecords.common/v1.json#/$defs/date"}
+        });
+        let cases = [
+            (
+                json!(["object", "null"]),
+                "rule member before(a, b): rules on an object that may be null",
+            ),
+            (
+                json!("string"),
+                "rule member before(a, b): rules need an object with fields",
+            ),
+            (
+                Value::Null,
+                "rule member before(a, b): rules need an object with fields",
+            ),
+        ];
+        for (kind, message) in cases {
+            let mut m = json!({"properties": dates, "allOf": [{"x-rule": "before(a, b)"}]});
+            if !kind.is_null() {
+                m["type"] = kind;
+            }
+            let mut schema = triage();
+            schema["properties"]["m"] = m;
+            assert_eq!(
+                messages(&schema),
+                pairs(&[("/properties/m/allOf/0", message)])
+            );
+        }
+    }
+
+    #[test]
+    fn empty_allof_is_a_finding() {
+        let mut schema = triage();
+        schema["allOf"] = json!([]);
+        assert_eq!(messages(&schema), pairs(&[("/allOf", "allOf is empty")]));
+        schema["allOf"] = json!({"x-rule": "one_of(at, on)"});
+        assert_eq!(
+            messages(&schema),
+            pairs(&[("/allOf", "allOf entries must be rule members")])
+        );
     }
 
     /// A member is checked against the object that holds its `allOf`, and

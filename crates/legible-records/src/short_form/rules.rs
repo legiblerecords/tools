@@ -71,6 +71,52 @@ pub fn rule_kind(property: &Value) -> Option<Kind> {
     }
 }
 
+/// Why an object's `allOf` can't hold rule members.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NoMembers {
+    /// The object has no `allOf`.
+    Absent,
+    /// `allOf` isn't a list.
+    NotAList,
+    /// `allOf` is an empty list.
+    Empty,
+    /// The object isn't `type: "object"`. The message: `rules on an object
+    /// that may be null` or `rules need an object with fields`.
+    NotAnObject(&'static str),
+}
+
+/// The entries of `node`'s `allOf`, with `node`'s `properties` to check
+/// them against, when `node` can hold rule members: it is
+/// `"type": "object"`, and its `allOf` is a list that isn't empty.
+/// Generation and lint both ask this before looking at the entries.
+pub(crate) fn rule_holder(
+    node: &Map<String, Value>,
+) -> Result<(&[Value], &Map<String, Value>), NoMembers> {
+    static EMPTY: std::sync::OnceLock<Map<String, Value>> = std::sync::OnceLock::new();
+    let entries = match node.get("allOf") {
+        None => return Err(NoMembers::Absent),
+        Some(Value::Array(entries)) if entries.is_empty() => return Err(NoMembers::Empty),
+        Some(Value::Array(entries)) => entries,
+        Some(_) => return Err(NoMembers::NotAList),
+    };
+    match node.get("type") {
+        Some(Value::String(kind)) if kind == "object" => {}
+        Some(Value::Array(kinds))
+            if kinds.contains(&Value::from("object")) && kinds.contains(&Value::from("null")) =>
+        {
+            return Err(NoMembers::NotAnObject(
+                "rules on an object that may be null",
+            ));
+        }
+        _ => return Err(NoMembers::NotAnObject("rules need an object with fields")),
+    }
+    let properties = node
+        .get("properties")
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| EMPTY.get_or_init(Map::new));
+    Ok((entries, properties))
+}
+
 /// The rule member that an `allOf` entry with `x-rule` `text` must be, on
 /// an object with these expanded `properties`, in a schema with these
 /// `$defs`: the whole member, `x-rule` included. Or the problem with the
@@ -99,11 +145,13 @@ pub(crate) fn rule_entry(
         published: false,
         defs,
     };
-    entry(text, properties, defs, |p| generator.describe(p))
+    rule_entry_with(text, properties, defs, |p| generator.describe(p))
 }
 
 /// [`rule_entry`], with the types in kind messages written by `describe`.
-fn entry(
+/// Expansion and generation pass their own, which know the schema's name;
+/// what is accepted doesn't depend on it.
+fn rule_entry_with(
     text: &str,
     properties: &Map<String, Value>,
     defs: &Map<String, Value>,
@@ -114,19 +162,8 @@ fn entry(
         return Err(format!("its text is {canonical}"));
     }
     let rule = parse(text)?;
-    checked_member(text, &rule, properties, defs, describe)
-}
-
-/// Checks a parsed rule and gives its whole member, `x-rule` set to `text`.
-fn checked_member(
-    text: &str,
-    rule: &Rule,
-    properties: &Map<String, Value>,
-    defs: &Map<String, Value>,
-    describe: impl Fn(&Value) -> String,
-) -> Result<Value, String> {
-    check(rule, properties, defs, describe)?;
-    Ok(member(text, rule, properties))
+    check(&rule, properties, defs, describe)?;
+    Ok(member(text, &rule, properties))
 }
 
 /// The whole rule member: [`rule_member`] with `x-rule` set to `text`.
@@ -428,17 +465,16 @@ impl Expander<'_> {
                 self.problem(&rule_loc, "a rule must be a string");
                 continue;
             };
+            // Each member goes through the gate that generation and lint
+            // use, from the rule's text.
             let text = rule_text(source);
-            // The rule as written is parsed, not its text, so a value in
-            // double quotes keeps its spaces.
-            let checked = parse(source).and_then(|rule| {
-                let member =
-                    checked_member(&text, &rule, &properties, &self.defs, |p| self.describe(p))?;
-                if texts.contains(&text) {
-                    return Err("rule written twice".to_owned());
-                }
-                Ok(member)
-            });
+            let checked = rule_entry_with(&text, &properties, &self.defs, |p| self.describe(p))
+                .and_then(|member| {
+                    if texts.contains(&text) {
+                        return Err("rule written twice".to_owned());
+                    }
+                    Ok(member)
+                });
             match checked {
                 Ok(member) => members.push(member),
                 Err(message) => self.problem(&rule_loc, format!("{message} in `{source}`")),
@@ -470,17 +506,16 @@ impl Generator<'_> {
     /// passes its checks. Otherwise `None`, and `allOf` stays under `json`.
     pub(super) fn rules_of(
         &self,
-        all_of: &Value,
+        entries: &[Value],
         properties: &Map<String, Value>,
     ) -> Option<Vec<Value>> {
-        let entries = all_of.as_array().filter(|entries| !entries.is_empty())?;
         let mut texts: Vec<&str> = Vec::new();
         for entry in entries {
             let text = entry.get("x-rule")?.as_str()?;
             if texts.contains(&text) {
                 return None;
             }
-            let member = self::entry(text, properties, self.defs, |p| self.describe(p)).ok()?;
+            let member = rule_entry_with(text, properties, self.defs, |p| self.describe(p)).ok()?;
             if member != *entry {
                 return None;
             }
@@ -558,6 +593,42 @@ mod tests {
                 let back = expand(&short, "t", &options).unwrap();
                 assert_eq!(normalize(&back), normalize(&body), "{short}");
             }
+        }
+    }
+
+    /// Expansion builds each member through the gate lint and generation
+    /// use, so what expands passes lint and generates back: spaces inside a
+    /// double-quoted value are kept in both the text and the value, and an
+    /// unquoted value is read from the text.
+    #[test]
+    fn expanded_members_pass_lint_and_generate_back() {
+        let options = Options::published("https://example.org/schemas/");
+        let head =
+            "type: org.example.thing\nversion: 1\nfields:\n  a?: string\n  b?: string\nrules:\n";
+        let cases = [
+            (
+                r#"  - 'requires(a = "x  y",  b)'"#,
+                json!("x  y"),
+                r#"  - requires(a = "x  y", b)"#,
+            ),
+            (
+                "  - requires(a = x  y,  b)",
+                json!("x y"),
+                "  - requires(a = x y, b)",
+            ),
+        ];
+        for (rule, value, canonical) in cases {
+            let short = format!("{head}{rule}\n");
+            let body = expand(&short, "thing", &options).unwrap();
+            assert_eq!(
+                body["allOf"][0]["if"]["properties"]["a"]["const"], value,
+                "{body}"
+            );
+            assert_eq!(crate::lint::lint(&body), vec![], "{body}");
+            assert_eq!(
+                generate(&body, "thing", &options).unwrap(),
+                format!("{head}{canonical}\n")
+            );
         }
     }
 

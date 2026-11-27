@@ -1306,6 +1306,50 @@
      "allOf": [
       {
        "if": {
+        "properties": {
+         "a": {
+          "const": "x  y"
+         }
+        },
+        "required": [
+         "a"
+        ]
+       },
+       "then": {
+        "properties": {
+         "b": {
+          "minLength": 1
+         }
+        },
+        "required": [
+         "b"
+        ]
+       },
+       "x-rule": "requires(a = \"x  y\", b)"
+      }
+     ],
+     "properties": {
+      "a": {
+       "type": "string"
+      },
+      "b": {
+       "type": "string"
+      }
+     },
+     "type": "object"
+    }
+   },
+   "name": "rules-quoted-value-spaces",
+   "schema": "t",
+   "short": "fields:\n  a?: string\n  b?: string\nrules:\n  - 'requires(a = \"x  y\",  b)'\n"
+  },
+  {
+   "expect": {
+    "body": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "allOf": [
+      {
+       "if": {
         "not": {
          "properties": {
           "kind": {

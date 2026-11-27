@@ -75,10 +75,37 @@ const MAX_DEPTH: usize = 32;
 const BAD_RULE: &str = "bad rule";
 
 /// A rule's text, as `x-rule` holds it: the rule as written, with each run
-/// of whitespace replaced by one space and the ends trimmed. Two rules on
-/// one object are the same rule when their texts are equal.
+/// of whitespace outside double-quoted values replaced by one space and the
+/// ends trimmed. Inside double quotes, where `\` escapes the next
+/// character, the text is kept as written. Two rules on one object are the
+/// same rule when their texts are equal.
 pub fn rule_text(source: &str) -> String {
-    source.split_whitespace().collect::<Vec<_>>().join(" ")
+    let mut out = String::with_capacity(source.len());
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut space = false;
+    for ch in source.chars() {
+        if quoted {
+            out.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                quoted = false;
+            }
+        } else if ch.is_whitespace() {
+            space = true;
+        } else {
+            if space && !out.is_empty() {
+                out.push(' ');
+            }
+            space = false;
+            quoted = ch == '"';
+            out.push(ch);
+        }
+    }
+    out
 }
 
 /// Parses a rule and runs the three checks after parsing, in order: the
@@ -932,6 +959,30 @@ mod tests {
         assert_eq!(
             rule_text("  requires(kind in (service, shared),  owner)\t"),
             "requires(kind in (service, shared), owner)"
+        );
+    }
+
+    /// Whitespace inside a double-quoted value is kept as written, so the
+    /// text and the value it expands to agree.
+    #[test]
+    fn rule_text_keeps_whitespace_inside_double_quotes() {
+        assert_eq!(
+            rule_text(r#"requires(a = "x  y",  b)"#),
+            r#"requires(a = "x  y", b)"#
+        );
+        assert_eq!(
+            rule_text("requires(a in (\"p\\\"  q\",\n  \" r \"),  b)"),
+            "requires(a in (\"p\\\"  q\", \" r \"), b)"
+        );
+        assert_eq!(rule_text("one_of(a,\n  b)"), "one_of(a, b)");
+        let text = rule_text(r#"requires(a = "x  y",  b)"#);
+        assert_eq!(parse(&text), parse(r#"requires(a = "x  y", b)"#));
+        assert_eq!(
+            parse(&text),
+            Ok(Rule::Requires(
+                Condition::Equals("a".to_owned(), Value::from("x  y")),
+                Condition::Given("b".to_owned()),
+            ))
         );
     }
 

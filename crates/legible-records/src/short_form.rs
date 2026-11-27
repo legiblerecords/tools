@@ -12,7 +12,7 @@ use crate::yaml::{emit_string, is_json_number, parse_restricted_with_lines};
 
 mod rules;
 
-pub(crate) use rules::rule_entry;
+pub(crate) use rules::{rule_entry, rule_holder, NoMembers};
 pub use rules::{rule_kind, rule_member};
 
 pub const DRAFT: &str = "https://json-schema.org/draft/2020-12/schema";
@@ -1391,15 +1391,8 @@ impl Generator<'_> {
     /// `rules` for an object node with `type: object` and an `allOf` that
     /// is all rule members ([`Generator::rules_of`]).
     fn rules_beside(&self, node: &Map<String, Value>) -> Option<Vec<Value>> {
-        if node.get("type") != Some(&json!("object")) {
-            return None;
-        }
-        let empty = Map::new();
-        let properties = node
-            .get("properties")
-            .and_then(Value::as_object)
-            .unwrap_or(&empty);
-        self.rules_of(node.get("allOf")?, properties)
+        let (entries, properties) = rule_holder(node).ok()?;
+        self.rules_of(entries, properties)
     }
 
     fn expr(&self, node: &Map<String, Value>) -> Option<Text> {

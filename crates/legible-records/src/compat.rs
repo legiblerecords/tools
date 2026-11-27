@@ -421,6 +421,19 @@ mod tests {
                 ),
             ]
         );
+        let items = |rules: Value| {
+            with(|s| {
+                s["properties"]["x"] = json!({"type": "array",
+                    "items": {"type": "object", "properties": {"a": {"type": "integer"}}, "allOf": rules}});
+            })
+        };
+        assert_eq!(
+            pairs(&items(json!([])), &items(json!([rule("before(a, a)")]))),
+            vec![(
+                "/properties/x/items".to_owned(),
+                "rule added: before(a, a)".to_owned()
+            )]
+        );
         assert_eq!(
             pairs(&base(), &with_rules(&["one_of(note, level)"], &[])),
             vec![("".to_owned(), "rule added: one_of(note, level)".to_owned())]
